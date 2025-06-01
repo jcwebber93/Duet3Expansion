@@ -1,7 +1,7 @@
 /**
  * \file
  *
- * \brief Linker script for running in internal FLASH on the SAME51J19A
+ * \brief Linker script for running in internal FLASH on the SAME51J20A
  *
  * Copyright (c) 2019 Microchip Technology Inc.
  *
@@ -35,16 +35,14 @@ SEARCH_DIR(.)
 /* Memory Spaces Definitions */
 MEMORY
 {
-  /*rom      (rx)  : ORIGIN = 0x00004000, LENGTH = 0x0007C000 */
-  rom      (rx)  : ORIGIN = 0x00000000, LENGTH = 0x00080000 
-  /* rom      (rx)  : ORIGIN = 0x00010000, LENGTH = 0x00070000*/
-  ram      (rwx) : ORIGIN = 0x20000000, LENGTH = 0x00030000
+  rom      (rx)  : ORIGIN = 0x00000000, LENGTH = 0x00100000
+  ram      (rwx) : ORIGIN = 0x20000000, LENGTH = 0x00040000
   bkupram  (rwx) : ORIGIN = 0x47000000, LENGTH = 0x00002000
   qspi     (rwx) : ORIGIN = 0x04000000, LENGTH = 0x01000000
 }
 
-/* The stack size used by the application. NOTE: you need to adjust according to your application.
-STACK_SIZE = DEFINED(STACK_SIZE) ? STACK_SIZE : DEFINED(__stack_size__) ? __stack_size__ : 0xC000;  */
+/* The stack size used by the application. NOTE: you need to adjust according to your application. */
+STACK_SIZE = DEFINED(STACK_SIZE) ? STACK_SIZE : DEFINED(__stack_size__) ? __stack_size__ : 0x10000;
 
 /* Section Definitions */
 SECTIONS
@@ -109,26 +107,6 @@ SECTIONS
     . = ALIGN(4);
     _etext = .;
 
-	/* CAN message buffers must be in the first 64K of RAM */
-    .canMessage (NOLOAD) :
-    {
-        . = ALIGN(4);
-        _sCanMessage = . ;
-		*(.CanMessage .CanMessage.*)
-        . = ALIGN(4);
-        _eCanMessage = . ;
-    } > ram
-
-    /* DMA programming and write-back memory, here because they are volatile so we must't CRC them when we check for data corruption */
-    .dmaBuffers (NOLOAD) :
-    {
-    	. = ALIGN(16);
-    	_sDmaBuffers = . ;
-    	*(.DmaBuffers .DmaBuffers.*)
-    	. = ALIGN(4);
-    	_eDmaBuffers = . ;
-    } > ram
-
     .relocate : AT (_etext)
     {
         . = ALIGN(4);
@@ -138,8 +116,6 @@ SECTIONS
         . = ALIGN(4);
         _erelocate = .;
     } > ram
-
-    _firmware_crc = _etext + (_erelocate - _srelocate);		/* We append the CRC32 to the binary file. This is its offset in memory. */
 
     .bkupram (NOLOAD):
     {
@@ -172,21 +148,16 @@ SECTIONS
         _ezero = .;
     } > ram
 
-    . = ALIGN(4);
-    _end = . ;
-    
-	/* .stack_dummy section doesn't contains any symbols. It is only
-       used for linker to calculate size of stack sections, and assign
-       values to stack symbols later */
-    .stack_dummy :
+    /* stack section */
+    .stack (NOLOAD):
     {
-        *(.stack*)
+        . = ALIGN(8);
+        _sstack = .;
+        . = . + STACK_SIZE;
+        . = ALIGN(8);
+        _estack = .;
     } > ram
 
-    /* Set stack top to end of ram, and stack limit move down by
-     * size of stack_dummy section */
-    __StackTop = ORIGIN(ram) + LENGTH(ram);
-    __StackLimit = __StackTop - SIZEOF(.stack_dummy);
-    PROVIDE(_sstack = __StackLimit);
-    PROVIDE(_estack = __StackTop);
+    . = ALIGN(4);
+    _end = . ;
 }

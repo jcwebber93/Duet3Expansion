@@ -38,11 +38,14 @@
 #define SUPPORT_TMC51xx			0
 #define SUPPORT_TMC2660			0
 #define SUPPORT_TMC22xx			0
-
+#define SUPPORT_TMC2208			0
+#define SUPPORT_TMC2209			0
+#define SUPPORT_TMC2240			0
 
 constexpr size_t NumDrivers = 1;
 
 // Define the step/dir/enable pins from your example
+
 constexpr Pin StepPins[NumDrivers] = { PortAPin(16) };      // D6 on Feather M4 CAN
 constexpr Pin DirectionPins[NumDrivers] = { PortAPin(17) };  // D7 on Feather M4 CAN
 constexpr Pin EnablePins[NumDrivers] = { PortAPin(18) };    // D8 on Feather M4 CAN
@@ -62,8 +65,8 @@ PortGroup * const StepPio = &(PORT->Group[0]);              // Port A for these 
 
 
 // CAN Interface (from your example)
-#define UseAlternateCanPins		true				// Standard CAN1 pins for SAME51 (PB14/PB15)
-constexpr unsigned int CanDeviceNumber = 1;
+constexpr bool UseAlternateCanPins = true;			// Standard CAN1 pins for SAME51 (PB14/PB15)
+//constexpr unsigned int CanDeviceNumber = 1;
 constexpr Pin CanTxPin = PortBPin(14);
 constexpr Pin CanRxPin = PortBPin(15);
 constexpr Pin CanStandbyPin = PortBPin(12);    // PB12
@@ -75,27 +78,18 @@ constexpr size_t MaxPortsPerHeater = 1;				// Default, not used if no heaters
 // Diagnostic LEDs
 // Feather M4 CAN has an onboard NeoPixel (PB23/D13) and a red LED (PB22/D12 on some variants, often tied to SPI SCK for DotStar/NeoPixel)
 // We'll use PortAPin(13) (D5 on some Feather M4 CAN layouts) as the diagnostic LED.
-constexpr Pin LedPins[] = { PortAPin(23) };         // PA13 for diagnostic LED
-constexpr bool LedActiveHigh = true;                // For standard LEDs; NeoPixel is data-driven
+constexpr Pin LedPins[] = { PortAPin(23) };         // PA23 for diagnostic LED
+constexpr bool LedActiveHigh = false;                // 
 #define SUPPORT_DMA_NEOPIXEL    0                   // Enable if NeoPixel is DMA driven
-#define SUPPORT_LED_STRIPS      1                   // To support the NeoPixel
 
-// General Purpose I/O (from your example)
-//constexpr Pin GpioOut0Pin  = PortAPin(13);  // D5
-//constexpr Pin GpioOut1Pin  = PortAPin(14);  // D4
-//constexpr Pin GpioIn0Pin   = PortAPin(12);  // D3
-//constexpr Pin GpioIn1Pin   = PortBPin(9);   // A3
 
-// Pin Table: Maps functional names to physical pins and capabilities.
-// This table is crucial for the main board to configure this expansion board.
-// The order here defines the logical pin numbers for some functions if not explicitly mapped.
 constexpr PinDescription PinTable[] =
 {
 	//	TC					TCC					ADC					SERCOM in			SERCOM out	  Exint 				PinNames
 	// Port A
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA00 
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA01 
-	{ TcOutput::none,	TccOutput::none,	AdcInput::none,     SercomIo::none,		SercomIo::none,		Nx,     nullptr       	},	// PA02 A0 
+	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_0,     SercomIo::none,		SercomIo::none,		2,     "pa02"       	},	// PA02 A0 
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx, 	nullptr      	},	// PA03
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,	    SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA04 A4 ESP
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,	    SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA05 A1 ESP
@@ -136,7 +130,7 @@ constexpr PinDescription PinTable[] =
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none, 	SercomIo::none,		SercomIo::none,		Nx,		nullptr		    },	// PB06
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none, 	SercomIo::none,		SercomIo::none,		Nx,		nullptr		    },	// PB07
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none, 	SercomIo::none,		SercomIo::none,		Nx,		nullptr	        },	// PB08 A2 ESP 
-	{ TcOutput::none,	TccOutput::none,	AdcInput::adc1_1,	SercomIo::none,		SercomIo::none,		9,		"pb09"	        },	// PB09 A3 IN
+	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr	        },	// PB09 A3 IN
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr	        },	// PB10
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB11
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr         },	// PB12
@@ -165,39 +159,37 @@ constexpr size_t NumPins = ARRAY_SIZE(PinTable);
 constexpr size_t NumNamedPins = ARRAY_SIZE(PinTable);
 constexpr size_t NumRealPins = 32 + 32;				// Max pins on SAME51 (PortA + PortB)
 constexpr size_t NumVirtualPins = 0;
-// static_assert(NumNamedPins <= NumRealPins + NumVirtualPins); // This assertion is loose. More important is that PinTable is correct.
+// Timer/counter used to generate step pulses and other sub-millisecond timings
+TcCount32 * const StepTc = &(TC0->COUNT32);
+constexpr IRQn StepTcIRQn = TC0_IRQn;
+constexpr unsigned int StepTcNumber = 0;
+#define STEP_TC_HANDLER			TC0_Handler
 
-// Timer/counter used to generate step pulses.
-// Choose an available TC/TCC. TC0, TC1, TC2, TC3 are 16-bit. TCC0, TCC1, TCC2 are 24-bit.
-// Let's use TC3 for step pulses, assuming it's free.
-TcCount16 * const StepTc = &(TC3->COUNT16);			// Using a 16-bit TC for steps
-constexpr IRQn StepTcIRQn = TC3_IRQn;
-constexpr unsigned int StepTcNumber = 3;
-#define STEP_TC_HANDLER			TC3_Handler
+// Available UART ports
+#define NUM_SERIAL_PORTS		0
 
-// DMA channel assignments (e.g., for NeoPixel)
-#if SUPPORT_DMA_NEOPIXEL
-constexpr DmaChannel DmacChanLedTx = 0;				// Example DMA channel for NeoPixel
-constexpr DmaPriority DmacPrioLed = DmaPriority::DmaPrioMedium;
-constexpr unsigned int NumDmaChannelsUsed = 0;
-#else
-constexpr unsigned int NumDmaChannelsUsed = 0;
-#endif
+// DMA channel assignments
+constexpr DmaChannel DmacChanTmcTx = 0;
+constexpr DmaChannel DmacChanTmcRx = 1;
+constexpr DmaChannel DmacChanAdc0Rx = 2;
+//constexpr DmaChannel DmacChanLedTx = 3;
 
-// Interrupt priorities (SAMC21/SAMD51 use 0-3, lower value is higher priority)
-// These are NvicPriorityType values (typically 0-7 for Cortex M4, but RRF uses a smaller range)
-// Values must be chosen carefully to interact with FreeRTOS if used.
-const NvicPriority NvicPriorityCan = 3;
-const NvicPriority NvicPriorityStep = 2;			// Step ISR should be high priority
-const NvicPriority NvicPriorityPins = 3;			// GPIO pin interrupts
-const NvicPriority NvicPriorityDmac = 3;			// DMA complete interrupts
+constexpr unsigned int NumDmaChannelsUsed = 4;			// must be at least the number of channels used, may be larger. Max 12 on the SAME5x.
+
+constexpr DmaPriority DmacPrioTmcTx = 0;
+constexpr DmaPriority DmacPrioTmcRx = 3;
+constexpr DmaPriority DmacPrioAdcRx = 2;
+//constexpr DmaPriority DmacPrioLed = 1;
+
+// Interrupt priorities, lower means higher priority. 0-2 can't make RTOS calls.
+const NvicPriority NvicPriorityStep = 3;				// step interrupt is next highest, it can preempt most other interrupts
+//const NvicPriority NvicPriorityUart = 3;				// serial driver makes RTOS calls
+const NvicPriority NvicPriorityI2C = 3;
+const NvicPriority NvicPriorityPins = 3;				// priority for GPIO pin interrupts
+const NvicPriority NvicPriorityCan = 4;
+const NvicPriority NvicPriorityDmac = 5;				// priority for DMA complete interrupts
 const NvicPriority NvicPriorityAdc = 5;
 
-// Expansion boards usually don't define these, they are set by the main board or defaults in common headers.
-// constexpr unsigned int MaxAxes = NumDrivers;
-// constexpr unsigned int MaxHeaters = 0;
-// constexpr unsigned int MaxFans = 0;
-
-#define NUM_SERIAL_PORTS		0					// No general purpose serial ports defined for expansion use by default
+	
 
 #endif /* SRC_CONFIG_PINS_FEATHERM4CAN_H_ */

@@ -423,8 +423,10 @@ namespace Platform
 		return (switches == 0) ? CanId::Exp3HCFirmwareUpdateAddress : switches;
 #elif defined(TOOL1LC) || defined(TOOL1RR) || defined(F3PTB)
 		return CanId::ToolBoardDefaultAddress;
-#elif defined(SAMMYC21) || defined(RPI_PICO) || defined(FLY36RRF) || defined(FeatherM4CAN)
+#elif defined(SAMMYC21) || defined(RPI_PICO) || defined(FLY36RRF)
 		return CanId::SammyC21DefaultAddress;
+#elif defined(FeatherM4CAN)
+		return CanId::FeatherM4CANDefaultAddress;
 #elif defined(EXP1XD)
 		return CanId::Exp1XDBoardDefaultAddress;
 #elif defined(EXP1HCL) || defined(M23CL)
@@ -552,14 +554,14 @@ void Platform::Init()
 #endif
 
 	InitLeds();
-#if defined(FeatherM4CAN)
+//#if defined(FeatherM4CAN)
 	// Enable CAN Transceiver and Boost Converter for Feather M4 CAN
 	// Assumes CanStandbyPin and CanBoostEnablePin are defined in FeatherM4CAN.h
 	// Standby Pin (PB12 on Feather M4 CAN) LOW to disable standby (enable transceiver)
-	IoPort::SetPinMode(CanStandbyPin, OUTPUT_LOW);
-	// Boost Enable Pin (PB13 on Feather M4 CAN) HIGH to enable the boost converter
-	IoPort::SetPinMode(CanBoostEnablePin, OUTPUT_HIGH);
-#endif
+//	IoPort::SetPinMode(CanStandbyPin, OUTPUT_LOW);
+//	// Boost Enable Pin (PB13 on Feather M4 CAN) HIGH to enable the boost converter
+//	IoPort::SetPinMode(CanBoostEnablePin, OUTPUT_HIGH);
+//#endif
 	// Turn all outputs off
 	for (size_t pin = 0; pin < ARRAY_SIZE(PinTable); ++pin)
 	{

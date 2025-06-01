@@ -178,19 +178,27 @@ void CanInterface::Init(CanAddress defaultBoardAddress, bool useAlternatePins, b
 
 	// Set up the CAN pins
 #if SAME5x
-	unsigned int whichPort;
-	if (useAlternatePins)
-	{
-		SetPinFunction(PortAPin(23), GpioPinFunction::I);
-		SetPinFunction(PortAPin(22), GpioPinFunction::I);
-		whichPort = 0;											// use CAN0	on EXP1HCL
-	}
-	else
-	{
-		SetPinFunction(PortBPin(13), GpioPinFunction::H);
-		SetPinFunction(PortBPin(12), GpioPinFunction::H);
-		whichPort = 1;											// use CAN1 on EXP3HC
-	}
+	unsigned int whichPort; // This will be used by CanDevice::Init for non-FeatherM4CAN SAME5x boards
+	#if defined(FeatherM4CAN)
+		// FeatherM4CAN uses specific pins defined in its header.
+		// CanTxPin is PB14, CanRxPin is PB15. CanPinsMode is GpioPinFunction::H.
+		SetPinFunction(CanTxPin, CanPinsMode);
+		SetPinFunction(CanRxPin, CanPinsMode);
+		whichPort = 1;
+	#else
+		if (useAlternatePins)
+		{
+			SetPinFunction(PortAPin(23), GpioPinFunction::I);	
+			SetPinFunction(PortAPin(22), GpioPinFunction::I);	
+			whichPort = 0;										// Use CAN0
+		}
+		else 
+		{
+			SetPinFunction(PortBPin(13), GpioPinFunction::H);	
+			SetPinFunction(PortBPin(12), GpioPinFunction::H);	
+			whichPort = 1;										// Use CAN1
+		}
+	#endif
 #elif SAMC21
 	if (useAlternatePins)
 	{
@@ -216,6 +224,10 @@ void CanInterface::Init(CanAddress defaultBoardAddress, bool useAlternatePins, b
 
 #ifdef SAMMYC21
 	SetPinMode(CanStandbyPin, OUTPUT_LOW);						// take the CAN drivers out of standby
+#endif
+#ifdef FeatherM4CAN
+	SetPinMode(CanStandbyPin, OUTPUT_LOW);
+	SetPinMode(CanBoostEnablePin, OUTPUT_HIGH);
 #endif
 
 	boardAddress = canConfigData.GetCanAddress(defaultBoardAddress);
