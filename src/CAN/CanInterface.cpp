@@ -178,10 +178,8 @@ void CanInterface::Init(CanAddress defaultBoardAddress, bool useAlternatePins, b
 
 	// Set up the CAN pins
 #if SAME5x
-	unsigned int whichPort; // This will be used by CanDevice::Init for non-FeatherM4CAN SAME5x boards
+	unsigned int whichPort;
 	#if defined(FeatherM4CAN)
-		// FeatherM4CAN uses specific pins defined in its header.
-		// CanTxPin is PB14, CanRxPin is PB15. CanPinsMode is GpioPinFunction::H.
 		SetPinFunction(CanTxPin, CanPinsMode);
 		SetPinFunction(CanRxPin, CanPinsMode);
 		whichPort = 1;
