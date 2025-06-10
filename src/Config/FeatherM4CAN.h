@@ -1,39 +1,38 @@
 /*
- * Pins_FeatherM4CAN.h - Duet3Expansion firmware pin definitions for Feather M4 CAN Express
- *
- * Based on SAMMYC21.h and user-provided initial pinout.
+ * Pins_FeatherM4CAN.h
+
  */
 
 #ifndef SRC_CONFIG_PINS_FEATHERM4CAN_H_
 #define SRC_CONFIG_PINS_FEATHERM4CAN_H_
 
 #include <Hardware/PinDescription.h>
-#include <DmacManager.h>
+//#include <DmacManager.h>
 
 #define BOARD_TYPE_NAME			"FeatherM4CAN"
-#define BOOTLOADER_NAME			"SAME5x"			// Or "UF2_SAME5x" if using UF2 bootloader
+#define BOOTLOADER_NAME			"SAME5x"			
 
 // General features
-#define HAS_VREF_MONITOR		0					// No dedicated VREF monitor circuit assumed
-#define HAS_VOLTAGE_MONITOR		0					// No on-board voltage monitoring assumed (can be added via ADC)
-#define HAS_12V_MONITOR			0					// No 12V monitoring assumed
-#define HAS_CPU_TEMP_SENSOR		1					// SAME51 has internal temperature sensor
-#define HAS_ADDRESS_SWITCHES	0					// No address switches on Feather
-#define HAS_BUTTONS				0					// Feather has a reset button, potentially a user button (not typically used by RRF expansion)
+#define HAS_VREF_MONITOR		0					
+#define HAS_VOLTAGE_MONITOR		0					
+#define HAS_12V_MONITOR			0					
+#define HAS_CPU_TEMP_SENSOR		1					
+#define HAS_ADDRESS_SWITCHES	0					
+#define HAS_BUTTONS				0					
+//#define USE_SERIAL_DEBUG		1
 
-// Driver Configuration (for one local "slow" driver as per your example)
+
 #define SUPPORT_DRIVERS			1
-#define HAS_SMART_DRIVERS		0					// Not using smart drivers for this example
+#define HAS_SMART_DRIVERS		0					
 #define HAS_STALL_DETECT		0
-#define SINGLE_DRIVER			1					// Configuring for a single driver
+#define SINGLE_DRIVER			1					
 #define SUPPORT_SLOW_DRIVERS	1
-#define DEDICATED_STEP_TIMER	1					// We'll use a TC/TCC for step generation
-#define SUPPORT_INPUT_SHAPING	0					// Typically not on a simple expansion driver
+#define DEDICATED_STEP_TIMER	1					
+#define SUPPORT_INPUT_SHAPING	0					
 
-// Polarity for generic step/dir drivers (adjust if needed)
 #define ACTIVE_HIGH_STEP		1
 #define ACTIVE_HIGH_DIR			1
-#define ACTIVE_HIGH_ENABLE		0					// Common for enable to be active low
+#define ACTIVE_HIGH_ENABLE		0					
 
 #define SUPPORT_TMC51xx			0
 #define SUPPORT_TMC2660			0
@@ -44,14 +43,12 @@
 
 constexpr size_t NumDrivers = 1;
 
-// Define the step/dir/enable pins from your example
 
-constexpr Pin StepPins[NumDrivers] = { PortAPin(16) };      // D6 on Feather M4 CAN
-constexpr Pin DirectionPins[NumDrivers] = { PortAPin(17) };  // D7 on Feather M4 CAN
-constexpr Pin EnablePins[NumDrivers] = { PortAPin(18) };    // D8 on Feather M4 CAN
-PortGroup * const StepPio = &(PORT->Group[0]);              // Port A for these pins
+constexpr Pin StepPins[NumDrivers] = { PortAPin(16) };      // 
+constexpr Pin DirectionPins[NumDrivers] = { PortAPin(17) };  // 
+constexpr Pin EnablePins[NumDrivers] = { PortAPin(18) };    // 
+PortGroup * const StepPio = &(PORT->Group[0]);              // 
 
-// Sensor Support (minimal for now, can be expanded)
 #define SUPPORT_THERMISTORS		0
 #define SUPPORT_SPI_SENSORS		0
 #define SUPPORT_I2C_SENSORS		0
@@ -61,11 +58,10 @@ PortGroup * const StepPio = &(PORT->Group[0]);              // Port A for these 
 #define SUPPORT_SDADC			0
 
 #define USE_MPU					0
-#define USE_CACHE				1					// SAME5x has cache
+#define USE_CACHE				1					
 
 
-// CAN Interface (from your example)
-constexpr bool UseAlternateCanPins = true;			// Standard CAN1 pins for SAME51 (PB14/PB15)
+constexpr bool UseAlternateCanPins = true;			
 //constexpr unsigned int CanDeviceNumber = 1;
 constexpr Pin CanTxPin = PortBPin(14);
 constexpr Pin CanRxPin = PortBPin(15);
@@ -73,14 +69,11 @@ constexpr Pin CanStandbyPin = PortBPin(12);    // PB12
 constexpr Pin CanBoostEnablePin = PortBPin(13); // PB13
 constexpr GpioPinFunction CanPinsMode = GpioPinFunction::H;
 
-constexpr size_t MaxPortsPerHeater = 1;				// Default, not used if no heaters
+constexpr size_t MaxPortsPerHeater = 1;				// 
 
-// Diagnostic LEDs
-// Feather M4 CAN has an onboard NeoPixel (PB23/D13) and a red LED (PB22/D12 on some variants, often tied to SPI SCK for DotStar/NeoPixel)
-// We'll use PortAPin(13) (D5 on some Feather M4 CAN layouts) as the diagnostic LED.
 constexpr Pin LedPins[] = { PortAPin(23) };         // PA23 for diagnostic LED
-constexpr bool LedActiveHigh = false;                // 
-#define SUPPORT_DMA_NEOPIXEL    0                   // Enable if NeoPixel is DMA driven
+constexpr bool LedActiveHigh = true;                // 
+#define SUPPORT_DMA_NEOPIXEL    0                   // 
 
 
 constexpr PinDescription PinTable[] =
@@ -167,6 +160,7 @@ constexpr unsigned int StepTcNumber = 0;
 
 // Available UART ports
 #define NUM_SERIAL_PORTS		0
+//constexpr IRQn Serial0_IRQn = SERCOM5_IRQn;
 
 // DMA channel assignments
 constexpr DmaChannel DmacChanTmcTx = 0;

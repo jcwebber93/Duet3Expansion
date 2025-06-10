@@ -239,9 +239,9 @@ namespace Platform
 
 #if SAME5x
 		NVIC_SetPriority(StepTcIRQn, NvicPriorityStep);
-# if defined(EXP3HC)
+# if defined(EXP3HC) || defined(FeatherM4CAN)
 		NVIC_SetPriority(CAN1_IRQn, NvicPriorityCan);
-# elif defined(EXP1HCL) || defined(M23CL) || defined(TOOL1RR) || defined(F3PTB) || defined(FeatherM4CAN)
+# elif defined(EXP1HCL) || defined(M23CL) || defined(TOOL1RR) || defined(F3PTB) 
 		NVIC_SetPriority(CAN0_IRQn, NvicPriorityCan);
 # else
 #  error CAN interrupt not specified
@@ -558,9 +558,9 @@ void Platform::Init()
 	// Enable CAN Transceiver and Boost Converter for Feather M4 CAN
 	// Assumes CanStandbyPin and CanBoostEnablePin are defined in FeatherM4CAN.h
 	// Standby Pin (PB12 on Feather M4 CAN) LOW to disable standby (enable transceiver)
-//	IoPort::SetPinMode(CanStandbyPin, OUTPUT_LOW);
-//	// Boost Enable Pin (PB13 on Feather M4 CAN) HIGH to enable the boost converter
-//	IoPort::SetPinMode(CanBoostEnablePin, OUTPUT_HIGH);
+	//IoPort::SetPinMode(CanStandbyPin, OUTPUT_LOW);
+	// Boost Enable Pin (PB13 on Feather M4 CAN) HIGH to enable the boost converter
+	//IoPort::SetPinMode(CanBoostEnablePin, OUTPUT_HIGH);
 //#endif
 	// Turn all outputs off
 	for (size_t pin = 0; pin < ARRAY_SIZE(PinTable); ++pin)
