@@ -49,7 +49,7 @@
     <stringAttribute key="org.eclipse.cdt.launch.PROGRAM_NAME" value="FeatherM4CAN/Duet3Firmware_FeatherM4CAN.elf"/>
     <stringAttribute key="org.eclipse.cdt.launch.PROJECT_ATTR" value="Duet3Expansion"/>
     <booleanAttribute key="org.eclipse.cdt.launch.PROJECT_BUILD_CONFIG_AUTO_ATTR" value="false"/>
-    <stringAttribute key="org.eclipse.cdt.launch.PROJECT_BUILD_CONFIG_ID_ATTR" value="cdt.managedbuild.config.gnu.cross.exe.release.1668726908.291530395.6461327.817420986.167127429"/>
+    <stringAttribute key="org.eclipse.cdt.launch.PROJECT_BUILD_CONFIG_ID_ATTR" value="cdt.managedbuild.config.gnu.cross.exe.release.1668726908.1420356148.1345779029.733752523.1546644399"/>
     <booleanAttribute key="org.eclipse.debug.core.ATTR_FORCE_SYSTEM_CONSOLE_ENCODING" value="false"/>
     <listAttribute key="org.eclipse.debug.core.MAPPED_RESOURCE_PATHS">
         <listEntry value="/Duet3Expansion"/>
