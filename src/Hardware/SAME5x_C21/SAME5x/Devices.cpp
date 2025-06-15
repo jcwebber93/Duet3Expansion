@@ -58,7 +58,7 @@ extern "C" void SERCOM3_3_Handler()
 	uart0.Interrupt3();
 }
 
-#elif defined(EXP1HCL) || defined(M23CL)
+#elif defined(EXP1HCL) || defined(M23CL) || defined(FeatherM4CAN)
 
 // Set up an optional serial port on the IO1 port via SERCOM2
 void SerialPortInit(AsyncSerial*) noexcept

@@ -179,24 +179,25 @@ void CanInterface::Init(CanAddress defaultBoardAddress, bool useAlternatePins, b
 	// Set up the CAN pins
 #if SAME5x
 	unsigned int whichPort;
-	#if defined(FeatherM4CAN)
-		SetPinFunction(CanTxPin, CanPinsMode);
-		SetPinFunction(CanRxPin, CanPinsMode);
-		whichPort = 1;
-	#else
-		if (useAlternatePins)
-		{
+	if (useAlternatePins)
+	{
+		#if defined(FeatherM4CAN)
+			SetPinFunction(PortBPin(14), GpioPinFunction::H);	
+			SetPinFunction(PortBPin(15), GpioPinFunction::H);
+			whichPort = 1;
+		#else
 			SetPinFunction(PortAPin(23), GpioPinFunction::I);	
 			SetPinFunction(PortAPin(22), GpioPinFunction::I);	
 			whichPort = 0;										// Use CAN0
-		}
-		else 
-		{
+		#endif
+	}
+	else 
+	{
 			SetPinFunction(PortBPin(13), GpioPinFunction::H);	
 			SetPinFunction(PortBPin(12), GpioPinFunction::H);	
 			whichPort = 1;										// Use CAN1
-		}
-	#endif
+	}
+	//#endif
 #elif SAMC21
 	if (useAlternatePins)
 	{
