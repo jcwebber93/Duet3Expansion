@@ -34,7 +34,9 @@ void debugPrintf(const char* fmt, ...) noexcept
 #if USE_SERIAL_DEBUG
 	vuprintf(Platform::DebugPutc, fmt, vargs);
 #else
-	vuprintf(CanInterface::DebugPutc, fmt, vargs);
+	//vuprintf(CanInterface::DebugPutc, fmt, vargs);
+	(void)fmt;    // Suppress unused parameter warning
+	(void)vargs;  // Suppress unused parameter warning
 #endif
 	va_end(vargs);
 }
@@ -44,7 +46,9 @@ void debugVprintf(const char *fmt, va_list vargs) noexcept
 #if USE_SERIAL_DEBUG
 	vuprintf(Platform::DebugPutc, fmt, vargs);
 #else
-	vuprintf(CanInterface::DebugPutc, fmt, vargs);
+	//vuprintf(CanInterface::DebugPutc, fmt, vargs);
+	(void)fmt;    // Suppress unused parameter warning
+	(void)vargs;  // Suppress unused parameter warning
 #endif
 }
 

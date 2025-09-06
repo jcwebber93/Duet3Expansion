@@ -554,14 +554,9 @@ void Platform::Init()
 #endif
 
 	InitLeds();
-//#if defined(FeatherM4CAN)
-	// Enable CAN Transceiver and Boost Converter for Feather M4 CAN
-	// Assumes CanStandbyPin and CanBoostEnablePin are defined in FeatherM4CAN.h
-	// Standby Pin (PB12 on Feather M4 CAN) LOW to disable standby (enable transceiver)
-	//IoPort::SetPinMode(CanStandbyPin, OUTPUT_LOW);
-	// Boost Enable Pin (PB13 on Feather M4 CAN) HIGH to enable the boost converter
-	//IoPort::SetPinMode(CanBoostEnablePin, OUTPUT_HIGH);
-//#endif
+#if defined(FeatherM4CAN)
+	SetPinMode(NeoPixelPWR, OUTPUT_HIGH);
+#endif
 	// Turn all outputs off
 	for (size_t pin = 0; pin < ARRAY_SIZE(PinTable); ++pin)
 	{

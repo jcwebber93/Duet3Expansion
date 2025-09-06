@@ -29,7 +29,7 @@
 #define SINGLE_DRIVER			1					
 #define SUPPORT_SLOW_DRIVERS	1
 #define DEDICATED_STEP_TIMER	1					
-#define SUPPORT_INPUT_SHAPING	0					
+#define SUPPORT_INPUT_SHAPING	1					
 
 #define ACTIVE_HIGH_STEP		1
 #define ACTIVE_HIGH_DIR			1
@@ -62,19 +62,22 @@ constexpr Pin EnablePins[NumDrivers] = { PortAPin(18) };
 #define USE_CACHE				1					
 
 constexpr bool UseAlternateCanPins = true;			
-//constexpr Pin CanTxPin = PortBPin(14);	
-//constexpr Pin CanRxPin = PortBPin(15);
 constexpr Pin CanStandbyPin = PortBPin(12);    // PB12
 constexpr Pin CanBoostEnablePin = PortBPin(13); // PB13
-//constexpr GpioPinFunction CanPinsMode = GpioPinFunction::H;
 
 constexpr size_t MaxPortsPerHeater = 0;
 
 constexpr Pin LedPins[] = { PortAPin(23) };
 constexpr bool LedActiveHigh = true;
+constexpr Pin NeoPixelPWR = PortBPin(3);
 
+constexpr auto sercom0dPad0 = SercomIo::sercom0d + SercomIo::pad0;
+constexpr auto sercom0dPad1 = SercomIo::sercom0d + SercomIo::pad1;
 constexpr auto sercom2cPad0 = SercomIo::sercom2c + SercomIo::pad0;
 constexpr auto sercom2cPad1 = SercomIo::sercom2c + SercomIo::pad1;
+constexpr auto sercom5cPad0 = SercomIo::sercom5c + SercomIo::pad0;
+constexpr auto sercom5cPad1 = SercomIo::sercom5c + SercomIo::pad1;
+constexpr auto sercom5dPad0 = SercomIo::sercom5d + SercomIo::pad0;
 
 constexpr PinDescription PinTable[] =
 {
@@ -82,27 +85,27 @@ constexpr PinDescription PinTable[] =
 	// Port A
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA00 32.768 CRYSTAL
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA01 32.768 CRYSTAL
-	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_0,   SercomIo::none,		SercomIo::none,		Nx,     "pa02"       	},	// PA02
+	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_0,   SercomIo::none,		SercomIo::none,		2,     "pa02"       	},	// PA02
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx, 	nullptr      	},	// PA03 NC
-	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_4,   SercomIo::none,		sercom0cPad0,		Nx,		"pa04"			},	// PA04
-	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_5,   sercom0cPad1,		SercomIo::none,		Nx,		"pa05"			},	// PA05
-	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_6,	SercomIo::none,		SercomIo::none,		Nx,		"pa06"			},	// PA06
+	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_4,   SercomIo::none,		sercom0dPad0,		4,		"pa04"			},	// PA04	
+	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_5,   sercom0dPad1,		SercomIo::none,		5,		"pa05"			},	// PA05
+	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_6,	SercomIo::none,		SercomIo::none,		6,		"pa06"			},	// PA06
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA07 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA08 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr     	},	// PA09 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr      	},	// PA10 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA11 NC 
-	{ TcOutput::none,	TccOutput::tcc0_6f,	AdcInput::none,		SercomIo::none,		sercom2cPad0,		Nx,		"pa12"			},	// PA12
-	{ TcOutput::tc2_1,	TccOutput::none,	AdcInput::none,		sercom2cPad1,		SercomIo::none,		Nx,		"pa13"			},	// PA13
-	{ TcOutput::none,	TccOutput::tcc1_2G,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa14"			},	// PA14
+	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		sercom2cPad0,		12,		"pa12"			},	// PA12
+	{ TcOutput::tc2_1,	TccOutput::none,	AdcInput::none,		sercom2cPad1,		SercomIo::none,		13,		"pa13"			},	// PA13
+	{ TcOutput::none,	TccOutput::tcc1_2G,	AdcInput::none,		SercomIo::none,		SercomIo::none,		14,		"pa14"			},	// PA14
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA15 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA16 STEP
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA17 DIR
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA18 ENA
-	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA19
-	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA20
-	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA21
-	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr     	},	// PA22
+	{ TcOutput::tc3_1,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		3,		"pa19"			},	// PA19
+	{ TcOutput::none,	TccOutput::tcc1_4F,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa20"			},	// PA20
+	{ TcOutput::none,	TccOutput::tcc1_5F,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa21"			},	// PA21
+	{ TcOutput::none,	TccOutput::tcc1_6F,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa22"	     	},	// PA22
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr     	},	// PA23 LED
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA24 USB D-
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA25 USB D+
@@ -116,22 +119,22 @@ constexpr PinDescription PinTable[] =
 	// Port B
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr	        },	// PB00 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr         },	// PB01 NC
-	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB02 NC
-	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr	        },	// PB03 NC
+	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		sercom5dPad0,		Nx,		"led"			},	// PB02 NEOPIXEL
+	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr	        },	// PB03 NEOPIXEL POWER
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,	    SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB04 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,	    SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB05 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none, 	SercomIo::none,		SercomIo::none,		Nx,		nullptr		    },	// PB06 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none, 	SercomIo::none,		SercomIo::none,		Nx,		nullptr		    },	// PB07 NC
-	{ TcOutput::none,	TccOutput::none,	AdcInput::none, 	SercomIo::none,		SercomIo::none,		Nx,		nullptr	        },	// PB08
-	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr	        },	// PB09
+	{ TcOutput::none,	TccOutput::none,	AdcInput::adc1_0, 	SercomIo::none,		SercomIo::none,		8,		nullptr	        },	// PB08
+	{ TcOutput::none,	TccOutput::none,	AdcInput::adc1_1,	SercomIo::none,		SercomIo::none,		9,		nullptr	        },	// PB09
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr	        },	// PB10 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB11 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr         },	// PB12 CAN STANDBY
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB13 CAN BOOST
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB14 CAN_TX CAN1TX
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB15 CAN_RX CAN1RX
-	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr		    },	// PB16
-	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB17
+	{ TcOutput::none,	TccOutput::tcc3_0F,	AdcInput::none,		SercomIo::none,		sercom5cPad0,		0,		"pb16"		    },	// PB16
+	{ TcOutput::none,	TccOutput::tcc3_1F,	AdcInput::none,		sercom5cPad1,		SercomIo::none,		1,		"pb17"			},	// PB17
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB18 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB19 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none, 	Nx,		nullptr			},	// PB20 NC
@@ -178,8 +181,7 @@ constexpr DmaPriority DmacPrioLed = 1;
 
 // Interrupt priorities, lower means higher priority. 0-2 can't make RTOS calls.
 const NvicPriority NvicPriorityStep = 3;				// step interrupt is next highest, it can preempt most other interrupts
-const NvicPriority NvicPriorityUart = 1;				// serial driver makes RTOS calls
-//const NvicPriority NvicPriorityI2C = 3;
+const NvicPriority NvicPriorityUart = 3;				// serial driver makes RTOS calls
 const NvicPriority NvicPriorityPins = 3;				// priority for GPIO pin interrupts
 const NvicPriority NvicPriorityCan = 4;
 const NvicPriority NvicPriorityDmac = 5;				// priority for DMA complete interrupts

@@ -23,7 +23,7 @@
     <stringAttribute key="ilg.gnumcueclipse.debug.gdbjtag.openocd.otherRunCommands" value=""/>
     <stringAttribute key="ilg.gnumcueclipse.debug.gdbjtag.openocd.secondResetType" value="halt"/>
     <stringAttribute key="ilg.gnumcueclipse.debug.gdbjtag.svdPath" value=""/>
-    <stringAttribute key="org.eclipse.cdt.debug.gdbjtag.core.imageFileName" value="C:\Users\Jared\Documents\GitHub\RRFBuild\Duet3Expansion\FeatherM4CAN\Duet3Firmware_FeatherM4CAN.bin"/>
+    <stringAttribute key="org.eclipse.cdt.debug.gdbjtag.core.imageFileName" value="C:\Users\Jared\Documents\GitHub\RRFBuild\Duet3Expansion\FeatherM4CAN-Debug\Duet3Firmware_FeatherM4CAN-Debug.elf"/>
     <stringAttribute key="org.eclipse.cdt.debug.gdbjtag.core.imageOffset" value=""/>
     <stringAttribute key="org.eclipse.cdt.debug.gdbjtag.core.ipAddress" value="localhost"/>
     <stringAttribute key="org.eclipse.cdt.debug.gdbjtag.core.jtagDevice" value="GNU MCU OpenOCD"/>
@@ -33,23 +33,23 @@
     <intAttribute key="org.eclipse.cdt.debug.gdbjtag.core.portNumber" value="3333"/>
     <booleanAttribute key="org.eclipse.cdt.debug.gdbjtag.core.setPcRegister" value="false"/>
     <booleanAttribute key="org.eclipse.cdt.debug.gdbjtag.core.setResume" value="false"/>
-    <booleanAttribute key="org.eclipse.cdt.debug.gdbjtag.core.setStopAt" value="true"/>
+    <booleanAttribute key="org.eclipse.cdt.debug.gdbjtag.core.setStopAt" value="false"/>
     <stringAttribute key="org.eclipse.cdt.debug.gdbjtag.core.stopAt" value="main"/>
-    <stringAttribute key="org.eclipse.cdt.debug.gdbjtag.core.symbolsFileName" value=""/>
+    <stringAttribute key="org.eclipse.cdt.debug.gdbjtag.core.symbolsFileName" value="C:\Users\Jared\Documents\GitHub\RRFBuild\Duet3Expansion\FeatherM4CAN-Debug\Duet3Firmware_FeatherM4CAN-Debug.elf"/>
     <stringAttribute key="org.eclipse.cdt.debug.gdbjtag.core.symbolsOffset" value=""/>
-    <booleanAttribute key="org.eclipse.cdt.debug.gdbjtag.core.useFileForImage" value="false"/>
-    <booleanAttribute key="org.eclipse.cdt.debug.gdbjtag.core.useFileForSymbols" value="false"/>
-    <booleanAttribute key="org.eclipse.cdt.debug.gdbjtag.core.useProjBinaryForImage" value="true"/>
-    <booleanAttribute key="org.eclipse.cdt.debug.gdbjtag.core.useProjBinaryForSymbols" value="true"/>
+    <booleanAttribute key="org.eclipse.cdt.debug.gdbjtag.core.useFileForImage" value="true"/>
+    <booleanAttribute key="org.eclipse.cdt.debug.gdbjtag.core.useFileForSymbols" value="true"/>
+    <booleanAttribute key="org.eclipse.cdt.debug.gdbjtag.core.useProjBinaryForImage" value="false"/>
+    <booleanAttribute key="org.eclipse.cdt.debug.gdbjtag.core.useProjBinaryForSymbols" value="false"/>
     <booleanAttribute key="org.eclipse.cdt.debug.gdbjtag.core.useRemoteTarget" value="true"/>
     <stringAttribute key="org.eclipse.cdt.dsf.gdb.DEBUG_NAME" value="C:\Program Files (x86)\Arm GNU Toolchain arm-none-eabi\13.2 Rel1\bin\arm-none-eabi-gdb.exe"/>
     <booleanAttribute key="org.eclipse.cdt.dsf.gdb.UPDATE_THREADLIST_ON_SUSPEND" value="false"/>
     <intAttribute key="org.eclipse.cdt.launch.ATTR_BUILD_BEFORE_LAUNCH_ATTR" value="2"/>
     <stringAttribute key="org.eclipse.cdt.launch.COREFILE_PATH" value=""/>
-    <stringAttribute key="org.eclipse.cdt.launch.PROGRAM_NAME" value="FeatherM4CAN/Duet3Firmware_FeatherM4CAN.elf"/>
+    <stringAttribute key="org.eclipse.cdt.launch.PROGRAM_NAME" value="FeatherM4CAN-Debug/Duet3Firmware_FeatherM4CAN-Debug.elf"/>
     <stringAttribute key="org.eclipse.cdt.launch.PROJECT_ATTR" value="Duet3Expansion"/>
     <booleanAttribute key="org.eclipse.cdt.launch.PROJECT_BUILD_CONFIG_AUTO_ATTR" value="false"/>
-    <stringAttribute key="org.eclipse.cdt.launch.PROJECT_BUILD_CONFIG_ID_ATTR" value="cdt.managedbuild.config.gnu.cross.exe.release.1668726908.1420356148.1345779029.733752523.1546644399"/>
+    <stringAttribute key="org.eclipse.cdt.launch.PROJECT_BUILD_CONFIG_ID_ATTR" value="cdt.managedbuild.config.gnu.cross.exe.release.1668726908.1275394251.776521622"/>
     <booleanAttribute key="org.eclipse.debug.core.ATTR_FORCE_SYSTEM_CONSOLE_ENCODING" value="false"/>
     <listAttribute key="org.eclipse.debug.core.MAPPED_RESOURCE_PATHS">
         <listEntry value="/Duet3Expansion"/>
