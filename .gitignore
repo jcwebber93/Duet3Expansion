@@ -60,3 +60,5 @@
 /.clang-format
 /FeatherM4CAN/
 /FeatherM4CAN-Debug/
+.vscode/settings.json
+AI_Readme.txt

@@ -571,12 +571,19 @@ inline __attribute__((always_inline)) uint32_t Move::GetStepInterval(size_t driv
 inline bool Move::GetCurrentMotion(size_t driver, uint32_t when, MotionParameters& mParams) noexcept
 {
 	const bool ret = dms[driver].GetCurrentMotion(when, mParams);
-	const float multiplier = ldexpf((GetDirectionValueNoCheck(driver)) ? -1.0 : 1.0, -(int)SmartDrivers::GetMicrostepShift(driver));
 
-	// Convert microsteps to full steps
-	mParams.position *= multiplier;
-	mParams.speed *= multiplier;
-	mParams.acceleration *= multiplier;
+	if (dms[driver].IsDcServo())
+	{
+		// For a DC servo, the motion is already in encoder counts (virtual steps), so no scaling is needed.
+	}
+	else
+	{
+		// For a stepper motor, convert microsteps to full steps
+		const float multiplier = ldexpf((GetDirectionValueNoCheck(driver)) ? -1.0 : 1.0, -(int)SmartDrivers::GetMicrostepShift(driver));
+		mParams.position *= multiplier;
+		mParams.speed *= multiplier;
+		mParams.acceleration *= multiplier;
+	}
 	return ret;
 }
 

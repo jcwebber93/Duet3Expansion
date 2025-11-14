@@ -75,6 +75,11 @@ public:
 	void InstanceDiagnostics(size_t driver, const StringRef& reply) noexcept;
 
 	// Methods called by the motion system
+	EncoderType GetEncoderType() const noexcept
+	{
+		return (encoder == nullptr) ? EncoderType::none : encoder->GetType();
+	}
+
 	void InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks timeElapsed) noexcept;
 	StandardDriverStatus ReadLiveStatus() const noexcept;
 	bool IsClosedLoopEnabled() const noexcept;
@@ -214,12 +219,6 @@ private:
 
 	static SampleBuffer sampleBuffer;							// buffer for collecting samples - shared between all drives if we have more than one
 
-	// Functions private to this module
-	EncoderType GetEncoderType() noexcept
-	{
-		return (encoder == nullptr) ? EncoderType::none : encoder->GetType();
-	}
-
 	// Return true if we are currently collecting data or primed to collect data or finishing sending data
 	inline bool CollectingData() noexcept { return samplingMode != RecordingMode::None; }
 
@@ -233,6 +232,11 @@ private:
 	void CreateCalibrationTask() noexcept;
 
 	// Tuning methods
+#if SUPPORT_DCSERVO
+	void InitDcPwm() noexcept;
+	void SetDcPwm(float controlSignal) noexcept;
+#endif
+
 	bool BasicTuning(bool firstIteration) noexcept;
 	bool EncoderCalibration(bool firstIteration) noexcept;
 	bool Step(bool firstIteration) noexcept;

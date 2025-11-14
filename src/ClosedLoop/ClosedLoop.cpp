@@ -40,6 +40,7 @@ using std::numeric_limits;
 # include "Encoders/TLI5012B.h"
 # include "Encoders/QuadratureEncoderPdec.h"
 # include "Encoders/LinearCompositeEncoder.h"
+# include "Encoders/DcServoEncoder.h"
 
 # include <ClosedLoop/DerivativeAveragingFilter.h>
 
@@ -55,6 +56,8 @@ using std::numeric_limits;
 # include <CanMessageGenericParser.h>
 # include <CanMessageGenericTables.h>
 # include <AppNotifyIndices.h>
+//# include <hri_gclk_e54.h>
+# include <AnalogOut.h>
 
 # if SUPPORT_TMC51xx
 #  include "Movement/StepperDrivers/TMC51xx.h"
@@ -125,6 +128,58 @@ void ClosedLoop::SetMotorPhase(uint16_t phase, float magnitude) noexcept
 #  error Multi driver code not implemented
 # endif
 }
+
+#if SUPPORT_DCSERVO
+
+void ClosedLoop::InitDcPwm() noexcept
+{
+	// Explicitly enable the clocks for the TCC peripherals used for DC servo PWM.
+	// This prevents a race condition on startup where the PWM timers might be configured before their clocks are running.
+	// TCC1 is used for DcServoRevPin (PA12)
+	// TCC2 is used for DcServoFwdPin (PB02)
+	// 0. Make sure the GCLK we want to use is running. We use the 48MHz clock from DPLL0, divided by 1.
+	//ConfigureGclk(GclkNum48MHz, GclkSource::dpll0, 1, false);
+
+	// 1. Enable the bus clocks for the peripherals
+	//MCLK->APBBMASK.reg |= MCLK_APBBMASK_TCC1;
+	//MCLK->APBCMASK.reg |= MCLK_APBCMASK_TCC2;
+
+	// 2. Configure and enable the generic clocks that feed the TCC peripherals.
+	//    We use GclkNum48MHz as the source, which is assumed to be running.
+	//    This is the missing step that caused the race condition.
+	//hri_gclk_write_PCHCTRL_reg(GCLK, TCC1_GCLK_ID, GCLK_PCHCTRL_GEN(GclkNum48MHz) | GCLK_PCHCTRL_CHEN);
+	//hri_gclk_write_PCHCTRL_reg(GCLK, TCC2_GCLK_ID, GCLK_PCHCTRL_GEN(GclkNum48MHz) | GCLK_PCHCTRL_CHEN);
+
+	IoPort::SetPinMode(DcServoFwdPin, PinMode::OUTPUT_LOW);
+	IoPort::SetPinMode(DcServoRevPin, PinMode::OUTPUT_LOW);
+}
+
+void ClosedLoop::SetDcPwm(float controlSignal) noexcept
+{
+	// The control signal is in the range -256.0 to +256.0.
+	// A positive signal means forward motion, negative means reverse.
+	const float pwmDuty = constrain<float>(fabsf(controlSignal) / 256.0f, 0.0f, 1.0f);
+
+	if (controlSignal > 0.0f)
+	{
+		// Forward motion
+		AnalogOut::Write(DcServoFwdPin, pwmDuty);
+		AnalogOut::Write(DcServoRevPin, 0.0f);
+	}
+	else if (controlSignal < 0.0f)
+	{
+		// Backward motion
+		AnalogOut::Write(DcServoFwdPin, 0.0f);
+		AnalogOut::Write(DcServoRevPin, pwmDuty);
+	}
+	else
+	{
+		// Stop
+		AnalogOut::Write(DcServoFwdPin, 0.0f);
+		AnalogOut::Write(DcServoRevPin, 0.0f);
+	}
+}
+#endif
 
 static_assert(ClockGenGclkNumber == GclkClosedLoop);							// check that this GCLK number has been reserved
 
@@ -218,9 +273,10 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 	}
 
 	// Validate the new params
-	if (tempEncoderType > EncoderType::NumValues)
+	if (tempEncoderType >= EncoderType::NumValues)
 	{
-		reply.copy("Invalid T value. Valid values are 1, 2 and 3");
+		reply.copy("Invalid T value. Valid values are ");
+		for (size_t i = 1; i < EncoderType::NumValues; ++i) { reply.catf("%s%u", (i == 1) ? "" : ", ", i); }
 		return GCodeResult::error;
 	}
 	if (seenE && (tempErrorThresholds[0] < 0 || tempErrorThresholds[1] < 0))
@@ -237,6 +293,13 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 	{
 		reply.copy("Torque per amp must be positive");
 		return GCodeResult::error;
+	}
+
+	if (seenT && tempEncoderType == EncoderType::dcServo)
+	{
+		// For DC servo control, we force a 1:1 mapping of steps to encoder counts.
+		// The user's M92 steps/mm should be set to the encoder's counts/mm.
+		tempStepsPerRev = (uint16_t)tempCPR;
 	}
 
 	if (seenT)
@@ -303,6 +366,14 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 
 		case EncoderType::rotaryQuadrature:
 			encoder = new QuadratureEncoderPdec(tempCPR, tempStepsPerRev);
+			break;
+
+		case EncoderType::dcServo:
+			// Use our new dedicated DcServoEncoder class
+			encoder = new DcServoEncoder(tempCPR, tempStepsPerRev);
+#if SUPPORT_DCSERVO
+			InitDcPwm();
+#endif
 			break;
 		}
 
@@ -712,33 +783,23 @@ void ClosedLoop::AdjustTargetMotorSteps(float amount) noexcept
 
 void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks timeElapsed) noexcept
 {
+	float currentFraction = 0.0;
+
 	// Read the current state of the drive. Do this even if we are not in closed loop mode.
 	if (encoder != nullptr && !encoder->TakeReading())
 	{
 		// Calculate and store the current error in full steps
 		hasMovementCommand = moveInstance->GetCurrentMotion(driverNumber, now, mParams);
-		if (hasMovementCommand)
-		{
-			if (inTorqueMode)
-			{
-				ExitTorqueMode();
-			}
-			if (samplingMode == RecordingMode::OnNextMove)
-			{
-				dataCollectionStartTicks = whenNextSampleDue = now;
-				samplingMode = RecordingMode::Immediate;
-			}
-		}
 
 		const float targetEncoderReading = rintf(mParams.position * encoder->GetCountsPerStep());
 		currentPositionError = (float)(targetEncoderReading - encoder->GetCurrentCount()) * encoder->GetStepsPerCount();
+
 		errorDerivativeFilter.ProcessReading(currentPositionError, now);
 		speedFilter.ProcessReading(encoder->GetCurrentCount() * encoder->GetStepsPerCount(), now);
-
-		float currentFraction = 0.0;
+		
 		if (currentMode != ClosedLoopMode::open)
 		{
-			if (tuning != 0)														// if we need to tune, do it
+			if (tuning != 0)
 			{
 				// Limit the rate at which we command tuning steps. We need to do signed comparison because initially, whenLastTuningStepTaken is in the future.
 				const int32_t timeSinceLastTuningStep = (int32_t)(now - whenLastTuningStepTaken);
@@ -747,78 +808,94 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 					whenLastTuningStepTaken = now;
 					PerformTune();
 				}
-				else if (samplingMode == RecordingMode::OnNextMove && timeSinceLastTuningStep + (int32_t)DataCollectionIdleStepTicks >= 0)
-				{
-					dataCollectionStartTicks = whenNextSampleDue = now;
-					samplingMode = RecordingMode::Immediate;
-				}
 			}
-			else if (tuningError == 0)
+#if SUPPORT_DCSERVO
+			else if (encoder->GetType() == EncoderType::dcServo)
 			{
-				currentFraction = ControlMotorCurrents(timeElapsed);				// otherwise control those motor currents!
-				if (inTorqueMode)
+				// DC Servo PID Logic
+
+				// Implement a dead zone to prevent dithering at standstill. If the error is less than half a step, treat it as zero.
+				//if (fabsf(currentPositionError) < 0.5f)
+				//{
+				//	currentPositionError = 0.0f;
+				//}
+
+				PIDPTerm = constrain<float>(Kp * currentPositionError, -256.0, 256.0);
+				PIDDTerm = constrain<float>(Kd * errorDerivativeFilter.GetDerivative() * StepTimer::StepClockRate, -256.0, 256.0);
+				const float timeDelta = (float)timeElapsed * (1.0/(float)StepTimer::StepClockRate);
+				PIDITerm = constrain<float>(PIDITerm + Ki * currentPositionError * timeDelta, -PIDIlimit, PIDIlimit);
+				PIDVTerm = mParams.speed * Kv;
+				PIDATerm = mParams.acceleration * Ka;
+				PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDVTerm + PIDATerm, -256.0, 256.0);
+				SetDcPwm(PIDControlSignal);
+				currentFraction = fabsf(PIDControlSignal) / 256.0f; // For stats reporting
+			}
+#endif
+			else // Stepper motor
+			{
+				if (tuningError == 0)
 				{
-					stall = preStall = false;
-				}
-				else
-				{
-					// Look for a stall or pre-stall
-					const float positionErr = fabsf(currentPositionError);
-					if (stall)
+					currentFraction = ControlMotorCurrents(timeElapsed);				// otherwise control those motor currents!
+					if (inTorqueMode)
 					{
-						// Reset the stall flag when the position error falls to below half the tolerance, to avoid generating too many stall events
-						//TODO do we need a minimum delay before resetting too?
-						if (errorThresholds[1] <= 0 || positionErr < errorThresholds[1]/2)
-						{
-							stall = false;
-						}
+						stall = preStall = false;
 					}
 					else
 					{
-						stall = errorThresholds[1] > 0 && positionErr > errorThresholds[1];
+						// Look for a stall or pre-stall
+						const float positionErr = fabsf(currentPositionError);
 						if (stall)
 						{
-							Heat::NewDriverFault();
+							// Reset the stall flag when the position error falls to below half the tolerance, to avoid generating too many stall events
+							//TODO do we need a minimum delay before resetting too?
+							if (errorThresholds[1] <= 0 || positionErr < errorThresholds[1]/2)
+							{
+								stall = false;
+							}
 						}
 						else
 						{
 							preStall = errorThresholds[0] > 0 && positionErr > errorThresholds[0];
+							stall = (errorThresholds[1] > 0 && positionErr > errorThresholds[1]);
+							if (stall)
+							{
+								Heat::NewDriverFault();
+							}
 						}
 					}
 				}
 			}
 		}
-
-		// Collect a sample, if we need to
-		if (samplingMode == RecordingMode::Immediate && (int32_t)(now - whenNextSampleDue) >= 0)
-		{
-			// It's time to take a sample
-			CollectSample();
-			whenNextSampleDue += dataCollectionIntervalTicks;
-		}
-
-		// Update the statistics
-		TaskCriticalSectionLocker lock;						// prevent a race with the Heat task that sends the statistics
-
-		const float absPositionError = fabsf(currentPositionError);
-		if (absPositionError > periodMaxAbsPositionError)
-		{
-			periodMaxAbsPositionError = absPositionError;
-		}
-		periodSumOfPositionErrorSquares += fsquare(currentPositionError);
-		if (currentFraction > periodMaxCurrentFraction)
-		{
-			periodMaxCurrentFraction = currentFraction;
-		}
-		periodSumOfCurrentFractions += currentFraction;
-		++periodNumSamples;
-
 	}
+
+	// Collect a sample, if we need to
+	if (samplingMode == RecordingMode::Immediate && (int32_t)(now - whenNextSampleDue) >= 0)
+	{
+		// It's time to take a sample
+		CollectSample();
+		whenNextSampleDue += dataCollectionIntervalTicks;
+	}
+
+	// Update the statistics
+	TaskCriticalSectionLocker lock;						// prevent a race with the Heat task that sends the statistics
+
+	const float absPositionError = fabsf(currentPositionError);
+	if (absPositionError > periodMaxAbsPositionError)
+	{
+		periodMaxAbsPositionError = absPositionError;
+	}
+	periodSumOfPositionErrorSquares += fsquare(currentPositionError);
+	if (currentFraction > periodMaxCurrentFraction)
+	{
+		periodMaxCurrentFraction = currentFraction;
+	}
+	periodSumOfCurrentFractions += currentFraction;
+	++periodNumSamples;
 }
 
 // Send data from the buffer to the main board over CAN
 [[noreturn]] void ClosedLoop::DataTransmissionTaskLoop() noexcept
-{
+				{
 	while (true)
 	{
 		const RecordingMode locMode = samplingMode;										// to capture the volatile variable

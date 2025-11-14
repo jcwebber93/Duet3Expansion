@@ -29,7 +29,7 @@
 #define SINGLE_DRIVER			1
 #define SUPPORT_SLOW_DRIVERS	1
 #define DEDICATED_STEP_TIMER	1
-#define SUPPORT_INPUT_SHAPING	0
+#define SUPPORT_INPUT_SHAPING	1
 
 #define SUPPORT_TMC51xx			0
 #define SUPPORT_TMC2660			0
@@ -67,7 +67,7 @@ constexpr Pin DirectionPins[NumDrivers] = { PortAPin(10) };
 #endif
 
 #define SUPPORT_THERMISTORS		1
-#define SUPPORT_SPI_SENSORS		1
+#define SUPPORT_SPI_SENSORS		0
 #define SUPPORT_I2C_SENSORS		1
 #define SUPPORT_LIS3DH			1
 #define SUPPORT_LDC1612			1

@@ -1,32 +1,29 @@
 /*
- * PositionDecoder.cpp
+ * DcServoEncoder.cpp
  *
- *  Created on: 31 Aug 2020
- *      Author: David
+ *  Created on: 14 Nov 2025
+ *      Author: Gemini
  */
 
 #include <RepRapFirmware.h>
 
-#if SUPPORT_CLOSED_LOOP && SAME5x
+#if SUPPORT_DCSERVO
 
+#include "DcServoEncoder.h"
 #include "QuadratureEncoderPdec.h"
 #include <hri_mclk_e54.h>
 #include <cmath>
 
-// Static method to set up the clocks needed by the PDEC peripheral
-/*static*/ void QuadratureEncoderPdec::SetupClocks() noexcept
+DcServoEncoder::DcServoEncoder(uint32_t p_countsPerRev, uint32_t p_stepsPerRev) noexcept
+	: Encoder((p_countsPerRev * 4.0f) / (float)p_stepsPerRev, p_stepsPerRev), lastCount(0), counterHigh(0), pulsesPerRev(p_countsPerRev)
 {
-	MCLK->APBCMASK.reg |= MCLK_APBCMASK_PDEC;
-	hri_gclk_write_PCHCTRL_reg(GCLK, PDEC_GCLK_ID, GCLK_PCHCTRL_GEN(GclkNum60MHz) | GCLK_PCHCTRL_CHEN);
 }
 
-// Overridden virtual functions
-
-// Initialise the encoder and enable it if successful. If there are any warnings or errors, put the corresponding message text in 'reply'.
-GCodeResult QuadratureEncoderPdec::Init(const StringRef& reply) noexcept
+// Initialise the encoder and enable it if successful.
+GCodeResult DcServoEncoder::Init(const StringRef& reply) noexcept
 {
 	// Set up the clocks
-	SetupClocks();
+	QuadratureEncoderPdec::SetupClocks();
 
 	PDEC->CTRLA.bit.ENABLE = 0;
 	while (PDEC->SYNCBUSY.bit.ENABLE) { }
@@ -38,18 +35,16 @@ GCodeResult QuadratureEncoderPdec::Init(const StringRef& reply) noexcept
 		SetPinFunction(p, PositionDecoderPinFunction);
 	}
 
-	// Set count per rev = 0
 	uint32_t ctrla = PDEC_CTRLA_MODE_QDEC | PDEC_CTRLA_CONF_X4
-					| PDEC_CTRLA_PINEN0 | PDEC_CTRLA_PINEN1			// enable A and B inputs but not the index input
+					| PDEC_CTRLA_PINEN0 | PDEC_CTRLA_PINEN1
 					| PDEC_CTRLA_ANGULAR(7);
 	PDEC->CTRLA.reg = ctrla;
 
-	// There's little if anything we can do to test the encoder
 	Enable();
 	return GCodeResult::ok;
 }
 
-void QuadratureEncoderPdec::Enable() noexcept
+void DcServoEncoder::Enable() noexcept
 {
 	SetPosition(0);
 	PDEC->CTRLA.bit.ENABLE = 1;
@@ -58,7 +53,7 @@ void QuadratureEncoderPdec::Enable() noexcept
 	while (PDEC->SYNCBUSY.bit.CTRLB) { }
 }
 
-void QuadratureEncoderPdec::Disable() noexcept
+void DcServoEncoder::Disable() noexcept
 {
 	PDEC->CTRLBSET.reg = PDEC_CTRLBSET_CMD_STOP;
 	while (PDEC->SYNCBUSY.bit.CTRLB) { }
@@ -66,31 +61,33 @@ void QuadratureEncoderPdec::Disable() noexcept
 	while (PDEC->SYNCBUSY.bit.ENABLE) { }
 }
 
-void QuadratureEncoderPdec::ClearFullRevs() noexcept
+bool DcServoEncoder::TakeReading() noexcept
+{
+	bool err;
+	currentCount = GetRelativePosition(err);
+	// currentPhasePosition is not used for a DC servo, but clear it for safety.
+	currentPhasePosition = 0;
+	return err;
+}
+
+void DcServoEncoder::ClearFullRevs() noexcept
 {
 	counterHigh = (lastCount & 0x8000) ? 0xFFFF : 0;
 	(void)TakeReading();
 }
 
-void QuadratureEncoderPdec::AppendDiagnostics(const StringRef &reply) noexcept
+void DcServoEncoder::AppendDiagnostics(const StringRef &reply) noexcept
 {
-	reply.catf("Encoder reverse polarity: %s", (IsBackwards()) ? "yes" : "no");
-
-#if 1	//debug
-	PDEC->CTRLBSET.reg = PDEC_CTRLBSET_CMD_READSYNC;
-	while (PDEC->SYNCBUSY.reg & (PDEC_SYNCBUSY_CTRLB | PDEC_SYNCBUSY_COUNT)) { }
-	const uint16_t count = PDEC->COUNT.reg;
-	reply.catf(", raw count %u", count);
-#endif
+	reply.catf("DC Servo Encoder, raw count %" PRIi32, currentCount);
 }
 
-void QuadratureEncoderPdec::AppendStatus(const StringRef& reply) noexcept
+void DcServoEncoder::AppendStatus(const StringRef& reply) noexcept
 {
-	reply.lcatf("Quadrature encoder pulses/rev: %.2f", (double)(countsPerRev / 4));
+	reply.lcatf("Quadrature encoder pulses/rev: %.2f", (double)pulsesPerRev);
 }
 
 // Get the current position relative to the starting position
-int32_t QuadratureEncoderPdec::GetRelativePosition(bool& error) noexcept
+int32_t DcServoEncoder::GetRelativePosition(bool& error) noexcept
 {
 	PDEC->CTRLBSET.reg = PDEC_CTRLBSET_CMD_READSYNC;
 	while (PDEC->SYNCBUSY.reg & (PDEC_SYNCBUSY_CTRLB | PDEC_SYNCBUSY_COUNT)) { }
@@ -114,10 +111,8 @@ int32_t QuadratureEncoderPdec::GetRelativePosition(bool& error) noexcept
 	return (int32_t)((counterHigh << 16) | count);
 }
 
-// End of overridden virtual functions
-
 // Set the position to the 32 bit signed value 'position'
-void QuadratureEncoderPdec::SetPosition(int32_t position) noexcept
+void DcServoEncoder::SetPosition(int32_t position) noexcept
 {
 	while (PDEC->SYNCBUSY.bit.STATUS) { }
 	const bool stopped = PDEC->STATUS.bit.STOP;
@@ -136,5 +131,4 @@ void QuadratureEncoderPdec::SetPosition(int32_t position) noexcept
 		while (PDEC->CTRLBSET.bit.CMD != 0) { }
 	}
 }
-
-#endif	// SUPPORT_CLOSED_LOOP
+#endif

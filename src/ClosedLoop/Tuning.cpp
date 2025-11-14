@@ -98,6 +98,12 @@ bool ClosedLoop::BasicTuning(bool firstIteration) noexcept
 		return true;
 	}
 
+	// Explicitly bypass for DC servo type for clarity and safety
+	if (encoder->GetType() == EncoderType::dcServo)
+	{
+		return true;
+	}
+
 	if (firstIteration)
 	{
 		state = BasicTuningState::forwardInitial;
@@ -230,6 +236,12 @@ bool ClosedLoop::EncoderCalibration(bool firstIteration) noexcept
 	if (!encoder->UsesCalibration())
 	{
 		return true;							// we don't do this tuning for relative encoders
+	}
+
+	// Explicitly bypass for DC servo type for clarity and safety
+	if (encoder->GetType() == EncoderType::dcServo)
+	{
+		return true;
 	}
 
 	const uint32_t currentPosition = desiredStepPhase;
