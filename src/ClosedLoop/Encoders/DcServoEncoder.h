@@ -2,7 +2,7 @@
  * DcServoEncoder.h
  *
  *  Created on: 14 Nov 2025
- *      Author: Gemini
+ *      Author: JCW + help
  */
 
 #ifndef SRC_CLOSEDLOOP_ENCODERS_DCSERVOENCODER_H_

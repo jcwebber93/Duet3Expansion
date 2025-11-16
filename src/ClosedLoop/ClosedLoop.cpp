@@ -40,7 +40,9 @@ using std::numeric_limits;
 # include "Encoders/TLI5012B.h"
 # include "Encoders/QuadratureEncoderPdec.h"
 # include "Encoders/LinearCompositeEncoder.h"
+#if SUPPORT_DCSERVO
 # include "Encoders/DcServoEncoder.h"
+#endif
 
 # include <ClosedLoop/DerivativeAveragingFilter.h>
 
@@ -56,7 +58,7 @@ using std::numeric_limits;
 # include <CanMessageGenericParser.h>
 # include <CanMessageGenericTables.h>
 # include <AppNotifyIndices.h>
-//# include <hri_gclk_e54.h>
+# include <hri_gclk_e54.h>
 # include <AnalogOut.h>
 
 # if SUPPORT_TMC51xx
@@ -133,25 +135,21 @@ void ClosedLoop::SetMotorPhase(uint16_t phase, float magnitude) noexcept
 
 void ClosedLoop::InitDcPwm() noexcept
 {
-	// Explicitly enable the clocks for the TCC peripherals used for DC servo PWM.
-	// This prevents a race condition on startup where the PWM timers might be configured before their clocks are running.
-	// TCC1 is used for DcServoRevPin (PA12)
-	// TCC2 is used for DcServoFwdPin (PB02)
-	// 0. Make sure the GCLK we want to use is running. We use the 48MHz clock from DPLL0, divided by 1.
-	//ConfigureGclk(GclkNum48MHz, GclkSource::dpll0, 1, false);
+	// Some of the items below likely aren't needed, as they were generated while troubleshooting a complete loss of PWM output on the pins. Needs to be reverted and retested.
+	MCLK->APBBMASK.reg |= MCLK_APBBMASK_TCC1;
+	MCLK->APBCMASK.reg |= MCLK_APBCMASK_TCC2;
 
-	// 1. Enable the bus clocks for the peripherals
-	//MCLK->APBBMASK.reg |= MCLK_APBBMASK_TCC1;
-	//MCLK->APBCMASK.reg |= MCLK_APBCMASK_TCC2;
 
-	// 2. Configure and enable the generic clocks that feed the TCC peripherals.
-	//    We use GclkNum48MHz as the source, which is assumed to be running.
-	//    This is the missing step that caused the race condition.
-	//hri_gclk_write_PCHCTRL_reg(GCLK, TCC1_GCLK_ID, GCLK_PCHCTRL_GEN(GclkNum48MHz) | GCLK_PCHCTRL_CHEN);
-	//hri_gclk_write_PCHCTRL_reg(GCLK, TCC2_GCLK_ID, GCLK_PCHCTRL_GEN(GclkNum48MHz) | GCLK_PCHCTRL_CHEN);
+	hri_gclk_write_PCHCTRL_reg(GCLK, TCC1_GCLK_ID, GCLK_PCHCTRL_GEN(GclkNum48MHz) | GCLK_PCHCTRL_CHEN);
+	hri_gclk_write_PCHCTRL_reg(GCLK, TCC2_GCLK_ID, GCLK_PCHCTRL_GEN(GclkNum48MHz) | GCLK_PCHCTRL_CHEN);
 
-	IoPort::SetPinMode(DcServoFwdPin, PinMode::OUTPUT_LOW);
-	IoPort::SetPinMode(DcServoRevPin, PinMode::OUTPUT_LOW);
+
+	SetPinFunction(DcServoFwdPin, GpioPinFunction::F);	// TCC2/WO[2]
+	SetPinFunction(DcServoRevPin, GpioPinFunction::G);	// TCC1/WO[2]
+
+
+	AnalogOut::Write(DcServoFwdPin, 0.0f);
+	AnalogOut::Write(DcServoRevPin, 0.0f);
 }
 
 void ClosedLoop::SetDcPwm(float controlSignal) noexcept
@@ -297,9 +295,9 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 
 	if (seenT && tempEncoderType == EncoderType::dcServo)
 	{
-		// For DC servo control, we force a 1:1 mapping of steps to encoder counts.
-		// The user's M92 steps/mm should be set to the encoder's counts/mm.
-		tempStepsPerRev = (uint16_t)tempCPR;
+		// For DC servo control, we force a 1:1 mapping of steps to quadrature encoder counts.
+		// The user's M92 steps/mm should be set to the encoder's quadrature counts/mm.
+		tempStepsPerRev = tempCPR * 4;
 	}
 
 	if (seenT)
@@ -368,13 +366,13 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 			encoder = new QuadratureEncoderPdec(tempCPR, tempStepsPerRev);
 			break;
 
+#if SUPPORT_DCSERVO
 		case EncoderType::dcServo:
 			// Use our new dedicated DcServoEncoder class
 			encoder = new DcServoEncoder(tempCPR, tempStepsPerRev);
-#if SUPPORT_DCSERVO
 			InitDcPwm();
-#endif
 			break;
+#endif
 		}
 
 		if (encoder != nullptr)
@@ -790,14 +788,19 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 	{
 		// Calculate and store the current error in full steps
 		hasMovementCommand = moveInstance->GetCurrentMotion(driverNumber, now, mParams);
-
+		
+		if (!hasMovementCommand)
+		{
+			mParams.speed = 0.0;
+			mParams.acceleration = 0.0;
+		}
 		const float targetEncoderReading = rintf(mParams.position * encoder->GetCountsPerStep());
 		currentPositionError = (float)(targetEncoderReading - encoder->GetCurrentCount()) * encoder->GetStepsPerCount();
 
 		errorDerivativeFilter.ProcessReading(currentPositionError, now);
 		speedFilter.ProcessReading(encoder->GetCurrentCount() * encoder->GetStepsPerCount(), now);
 		
-		if (currentMode != ClosedLoopMode::open)
+		if (currentMode != ClosedLoopMode::open && !stall)
 		{
 			if (tuning != 0)
 			{
@@ -814,11 +817,11 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 			{
 				// DC Servo PID Logic
 
-				// Implement a dead zone to prevent dithering at standstill. If the error is less than half a step, treat it as zero.
-				//if (fabsf(currentPositionError) < 0.5f)
-				//{
-				//	currentPositionError = 0.0f;
-				//}
+				// Implement a dead zone to prevent dithering at standstill. If the error is less than half a step, treat it as zero. Doesn't seem to be working, or of value yet.
+				if (fabsf(currentPositionError) < 0.5f)
+				{
+					currentPositionError = 0.0f;
+				}
 
 				PIDPTerm = constrain<float>(Kp * currentPositionError, -256.0, 256.0);
 				PIDDTerm = constrain<float>(Kd * errorDerivativeFilter.GetDerivative() * StepTimer::StepClockRate, -256.0, 256.0);
@@ -836,32 +839,44 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 				if (tuningError == 0)
 				{
 					currentFraction = ControlMotorCurrents(timeElapsed);				// otherwise control those motor currents!
-					if (inTorqueMode)
+				}
+			}
+		}
+
+		// Stall detection logic, executed for both stepper and DC servo if in closed loop mode.
+		if (currentMode != ClosedLoopMode::open)
+		{
+			if (inTorqueMode)
+			{
+				stall = preStall = false;
+			}
+			else
+			{
+				const float positionErr = fabsf(currentPositionError);
+				if (stall)
+				{
+					// A stall has occurred. Motor is stopped.
+					// Reset the stall flag only when the position error falls to below half the tolerance.
+					// This requires user intervention (e.g., a new move) to clear the error.
+					if (errorThresholds[1] <= 0 || positionErr < errorThresholds[1]/2)
 					{
-						stall = preStall = false;
+						stall = false;
 					}
-					else
+				}
+				else
+				{
+					// Check for a new stall condition
+					preStall = errorThresholds[0] > 0 && positionErr > errorThresholds[0];
+					stall = (errorThresholds[1] > 0 && positionErr > errorThresholds[1]);
+					if (stall)
 					{
-						// Look for a stall or pre-stall
-						const float positionErr = fabsf(currentPositionError);
-						if (stall)
+						// A stall has just been detected. Stop the motor immediately.
+						if (encoder->GetType() == EncoderType::dcServo)
 						{
-							// Reset the stall flag when the position error falls to below half the tolerance, to avoid generating too many stall events
-							//TODO do we need a minimum delay before resetting too?
-							if (errorThresholds[1] <= 0 || positionErr < errorThresholds[1]/2)
-							{
-								stall = false;
-							}
+							SetDcPwm(0.0);
 						}
-						else
-						{
-							preStall = errorThresholds[0] > 0 && positionErr > errorThresholds[0];
-							stall = (errorThresholds[1] > 0 && positionErr > errorThresholds[1]);
-							if (stall)
-							{
-								Heat::NewDriverFault();
-							}
-						}
+						// For steppers, the next call to ControlMotorCurrents will be skipped.
+						Heat::NewDriverFault();
 					}
 				}
 			}

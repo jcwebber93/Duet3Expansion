@@ -2,7 +2,7 @@
  * DcServoEncoder.cpp
  *
  *  Created on: 14 Nov 2025
- *      Author: Gemini
+ *      Author: JCW + help
  */
 
 #include <RepRapFirmware.h>
@@ -15,7 +15,7 @@
 #include <cmath>
 
 DcServoEncoder::DcServoEncoder(uint32_t p_countsPerRev, uint32_t p_stepsPerRev) noexcept
-	: Encoder((p_countsPerRev * 4.0f) / (float)p_stepsPerRev, p_stepsPerRev), lastCount(0), counterHigh(0), pulsesPerRev(p_countsPerRev)
+	: Encoder(1.0, p_stepsPerRev), lastCount(0), counterHigh(0), pulsesPerRev(p_countsPerRev)
 {
 }
 
@@ -83,7 +83,7 @@ void DcServoEncoder::AppendDiagnostics(const StringRef &reply) noexcept
 
 void DcServoEncoder::AppendStatus(const StringRef& reply) noexcept
 {
-	reply.lcatf("Quadrature encoder pulses/rev: %.2f", (double)pulsesPerRev);
+	reply.lcatf("Quadrature encoder PPR: %" PRIu32 " (%" PRIu32 " CPR)", pulsesPerRev, pulsesPerRev * 4);
 }
 
 // Get the current position relative to the starting position

@@ -66,7 +66,7 @@ public:
 	// Return true if this drive is moving. Segments are advanced as necessary.
 	bool GetCurrentMotion(uint32_t when, MotionParameters& mParams) noexcept;
 
-#if SUPPORT_CLOSED_LOOP
+#if SUPPORT_DCSERVO
 	bool IsDcServo() const noexcept { return closedLoopControl.GetEncoderType() == EncoderType::dcServo; }
 #else
 	bool IsDcServo() const noexcept { return false; }
