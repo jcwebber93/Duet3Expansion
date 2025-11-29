@@ -62,3 +62,4 @@
 /FeatherM4CAN-Debug/
 .vscode/settings.json
 AI_Readme.txt
+src/ClosedLoop/ClosedLoop.bad_cascade.cpp

@@ -226,6 +226,7 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 	float tempKd = Kd;
 	float tempKv = Kv;
 	float tempKa = Ka;
+	float tempKpp = Kpp;
 	uint16_t tempStepsPerRev = 200;
 	size_t numThresholds = 2;
 	float tempErrorThresholds[numThresholds];
@@ -234,7 +235,7 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 	// Pull changed parameters
 	const bool seenT = parser.GetUintParam('T', tempEncoderType);
 	const bool seenC = parser.GetFloatParam('C', tempCPR);
-	const bool seenPid = parser.GetFloatParam('R', tempKp) | parser.GetFloatParam('I', tempKi)  | parser.GetFloatParam('D', tempKd)
+	const bool seenPid = parser.GetFloatParam('R', tempKp) | parser.GetFloatParam('I', tempKi)  | parser.GetFloatParam('D', tempKd) | parser.GetFloatParam('J', tempKpp)
 						| parser.GetFloatParam('V', tempKv) | parser.GetFloatParam('A', tempKa);
 	const bool seenE = parser.GetFloatArrayParam('E', numThresholds, tempErrorThresholds);
 	const bool seenS = parser.GetUintParam('S', tempStepsPerRev);
@@ -251,8 +252,8 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 		{
 			reply.catf("Encoder type: %s", GetEncoderType().ToString());
 			encoder->AppendStatus(reply);
-			reply.lcatf("PID parameters P=%.1f I=%.3f D=%.3f V=%.1f A=%.1f, torque constant %.2fNm/A",
-						(double)Kp, (double)Ki, (double)Kd, (double)Kv, (double)Ka, (double)torquePerAmp);
+			reply.lcatf("PID parameters P=%.1f I=%.3f D=%.3f V=%.1f A=%.1f, torque constant %.2fNm/A, J=%.1f",
+						(double)Kp, (double)Ki, (double)Kd, (double)Kv, (double)Ka, (double)torquePerAmp, (double)Kpp);
 			reply.lcatf("Warning/error threshold %.2f/%.2f", (double)errorThresholds[0], (double)errorThresholds[1]);
 		}
 		return GCodeResult::ok;
@@ -316,6 +317,7 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 			Kd = tempKd;
 			Kv = tempKv;
 			Ka = tempKa;
+			Kpp = tempKpp;
 			PIDITerm = 0.0;
 			errorDerivativeFilter.Reset();
 			speedFilter.Reset();
@@ -787,12 +789,21 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 	if (encoder != nullptr && !encoder->TakeReading())
 	{
 		// Calculate and store the current error in full steps
+		const bool wasMoving = hasMovementCommand;
 		hasMovementCommand = moveInstance->GetCurrentMotion(driverNumber, now, mParams);
 		
 		if (!hasMovementCommand)
 		{
 			mParams.speed = 0.0;
 			mParams.acceleration = 0.0;
+		}
+
+		// If we are starting a new move after being idle, reset the filters and integral term to prevent a large spike on the first step.
+		if (hasMovementCommand && !wasMoving)
+		{
+			PIDITerm = 0.0;
+			errorDerivativeFilter.Reset();
+			speedFilter.Reset();
 		}
 		const float targetEncoderReading = rintf(mParams.position * encoder->GetCountsPerStep());
 		currentPositionError = (float)(targetEncoderReading - encoder->GetCurrentCount()) * encoder->GetStepsPerCount();
@@ -815,21 +826,34 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 #if SUPPORT_DCSERVO
 			else if (encoder->GetType() == EncoderType::dcServo)
 			{
-				// DC Servo PID Logic
+				// Cascaded PID Controller for DC Servo. All velocities are in steps/tick.
 
-				// Implement a dead zone to prevent dithering at standstill. If the error is less than half a step, treat it as zero. Doesn't seem to be working, or of value yet.
-				if (fabsf(currentPositionError) < 0.5f)
-				{
-					currentPositionError = 0.0f;
-				}
+				// 1. Outer Position Loop (P-controller)
+				// The output is a corrective velocity in steps/tick.
+				PIDJTerm = Kpp * currentPositionError;
 
-				PIDPTerm = constrain<float>(Kp * currentPositionError, -256.0, 256.0);
-				PIDDTerm = constrain<float>(Kd * errorDerivativeFilter.GetDerivative() * StepTimer::StepClockRate, -256.0, 256.0);
-				const float timeDelta = (float)timeElapsed * (1.0/(float)StepTimer::StepClockRate);
-				PIDITerm = constrain<float>(PIDITerm + Ki * currentPositionError * timeDelta, -PIDIlimit, PIDIlimit);
-				PIDVTerm = mParams.speed * Kv;
-				PIDATerm = mParams.acceleration * Ka;
-				PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDVTerm + PIDATerm, -256.0, 256.0);
+				// 2. Feedforward Terms
+				// mParams.speed is already in steps/tick.
+				// mParams.acceleration is already in steps/tick^2.
+				PIDVTerm = Kv * mParams.speed;
+				PIDATerm = Ka * mParams.acceleration;
+
+				// 3. Calculate Target Velocity for Inner Loop
+				// This is the sum of the corrective velocity from the position loop and the velocity feedforward.
+				const float vel_target = PIDJTerm + PIDVTerm;
+				
+				// 4. Inner Velocity Loop (PID-controller)
+				// Get measured velocity in steps/tick from the encoder filter.
+				vel_measured = speedFilter.GetDerivative();
+				const float vel_error = vel_target - vel_measured;
+
+				PIDPTerm = Kp * vel_error;
+				PIDITerm = constrain<float>(PIDITerm + (Ki * vel_error * timeElapsed), -PIDIlimit, PIDIlimit);
+				PIDDTerm = Kd * (vel_error - errorDerivativeFilter.GetDerivative());	// errorDerivativeFilter is not yet updated for this loop
+
+				// 5. Final Control Signal
+				// Sum the velocity PID terms and the acceleration feedforward term.
+				PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDATerm, -256.0f, 256.0f);
 				SetDcPwm(PIDControlSignal);
 				currentFraction = fabsf(PIDControlSignal) / 256.0f; // For stats reporting
 			}
@@ -930,6 +954,7 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 
 				// Populate the control fields
 				msg.firstSampleNumber = samplesSent;
+				msg.ClearReservedFields();
 				msg.filter = filterRequested;
 
 				unsigned int numSamplesInMessage = 0;
@@ -988,13 +1013,15 @@ void ClosedLoop::CollectSample() noexcept
 		if (filterRequested & CL_RECORD_PID_P_TERM)  			{ sampleBuffer.PutF16(PIDPTerm); }
 		if (filterRequested & CL_RECORD_PID_I_TERM)  			{ sampleBuffer.PutF16(PIDITerm); }
 		if (filterRequested & CL_RECORD_PID_D_TERM)  			{ sampleBuffer.PutF16(PIDDTerm); }
-		if (filterRequested & CL_RECORD_PID_V_TERM)  			{ sampleBuffer.PutF16(PIDVTerm); }
-		if (filterRequested & CL_RECORD_PID_A_TERM)  			{ sampleBuffer.PutF16(PIDATerm); }
 		if (filterRequested & CL_RECORD_CURRENT_STEP_PHASE)  	{ sampleBuffer.PutU16(encoder->GetCurrentPhasePosition()); }
 		if (filterRequested & CL_RECORD_DESIRED_STEP_PHASE)  	{ sampleBuffer.PutU16(desiredStepPhase); }
-		if (filterRequested & CL_RECORD_PHASE_SHIFT)  			{ sampleBuffer.PutU16(0); }
+		if (filterRequested & CL_RECORD_PHASE_SHIFT)  			{ sampleBuffer.PutF16(vel_measured); }
 		if (filterRequested & CL_RECORD_COIL_A_CURRENT) 		{ sampleBuffer.PutI16(coilA); }
 		if (filterRequested & CL_RECORD_COIL_B_CURRENT) 		{ sampleBuffer.PutI16(coilB); }
+		if (filterRequested & CL_RECORD_PID_V_TERM)  			{ sampleBuffer.PutF16(PIDVTerm); }
+		if (filterRequested & CL_RECORD_PID_A_TERM)  			{ sampleBuffer.PutF16(PIDATerm); }
+		if (filterRequested & CL_RECORD_PID_J_TERM)				{ sampleBuffer.PutF16(PIDJTerm); }
+		if (filterRequested & CL_RECORD_MEASURED_VELOCITY) 		{ sampleBuffer.PutF16(vel_measured); }
 
 		sampleBuffer.FinishSample();
 		++samplesCollected;
@@ -1144,7 +1171,7 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 		reply.lcatf("Tuning mode: %#x, tuning error: %#x, collecting data: %s", tuning, tuningError, CollectingData() ? "yes" : "no");
 		if (CollectingData())
 		{
-			reply.catf(" (filter: %#x, mode: %u, rate: %u, movement: %u)", filterRequested, samplingMode, (unsigned int)(StepTimer::StepClockRate/dataCollectionIntervalTicks), movementRequested);
+			reply.catf(" (filter: %#lx, mode: %u, rate: %u, movement: %u)", filterRequested, samplingMode, (unsigned int)(StepTimer::StepClockRate/dataCollectionIntervalTicks), movementRequested);
 		}
 	}
 

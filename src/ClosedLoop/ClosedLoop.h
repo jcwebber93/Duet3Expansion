@@ -153,6 +153,7 @@ private:
 	float 	Kd = 0.0;											// The proportional constant for the PID controller
 	float	Kv = 1000.0;										// The velocity feedforward constant
 	float	Ka = 0.0;											// The acceleration feedforward constant
+	float	Kpp = 1.0;											// The P for position
 
 	float 	errorThresholds[2];									// The error thresholds. [0] is pre-stall, [1] is stall
 
@@ -172,9 +173,12 @@ private:
 	float 	PIDPTerm;									// Proportional term
 	float 	PIDITerm = 0.0;								// Integral accumulator
 	float 	PIDDTerm;									// Derivative term
+	float	PIDVelITerm = 0.0;							// Velocity integral accumulator
 	float	PIDVTerm;									// Velocity feedforward term
 	float	PIDATerm;									// Acceleration feedforward term
 	float	PIDControlSignal;							// The overall signal from the PID controller
+	float	PIDJTerm;									// P Pos term
+	float 	vel_measured;
 
 
 	uint16_t desiredStepPhase = 0;						// The desired position of the motor
@@ -203,7 +207,7 @@ private:
 	// Input variables
 	volatile RecordingMode samplingMode = RecordingMode::None;	// What mode did they request? Volatile because we care about when it is written.
 	uint8_t  movementRequested;									// Which calibration movement did they request? 0=none, 1=polarity, 2=continuous
-	uint16_t filterRequested;									// What filter did they request?
+	uint32_t filterRequested;									// What filter did they request?
 	volatile uint16_t samplesRequested;							// The number of samples requested
 
 	// Derived variables
