@@ -43,7 +43,7 @@ constexpr uint32_t CanUserAreaDataOffset = 256 - sizeof(CanUserAreaData);
 #endif
 
 #if SAMC21
-constexpr unsigned int NumCanBuffers = 20;		// SAMC21-based boards have at most one driver, so allocate fewer message buffers to save RAM
+constexpr unsigned int NumCanBuffers = 10;		// SAMC21-based boards have at most one driver, so allocate fewer message buffers to save RAM
 #else
 constexpr unsigned int NumCanBuffers = 40;
 #endif
@@ -79,7 +79,11 @@ constexpr CanDevice::Config Can0Config =
 #else
 	.numRxBuffers = 1,								// we use a dedicated buffer for the clock sync messages
 #endif
+#if SAMC21
+	.rxFifo0Size = 16,								// save RAM on SAMC21
+#else
 	.rxFifo0Size = 32,
+#endif
 #if RP2040
 	.rxFifo1Size = 1,								// we use FIFO 1 instead of a dedicated receive buffer to receive CAN clock messages
 #else
@@ -100,7 +104,7 @@ constexpr size_t CanClockTaskStackWords =
 #if RP2040
 										400;		// to allow calls to debugPrintf
 #else
-										130;
+										140;		// 140 is enough (minimum is 133 on 3HC) when we enable CAN debugging
 #endif
 
 static Task<CanClockTaskStackWords> *canClockTask = nullptr;				// allocated dynamically to save RAM when updating the bootloader

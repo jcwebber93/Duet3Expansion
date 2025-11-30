@@ -400,4 +400,12 @@ AbsoluteRotaryEncoder *CreateRotaryEncoder(MagneticEncoderType magEncoderType, u
 
 #endif
 
+	case MagneticEncoderType::as5047d:
+	default:			// default case should never happen so just keep the compiler happy
+		return new AS5047D(p_stepsPerRev, spiDev, EncoderCsPin);
+	}
+}
+
+#endif
+
 // End

@@ -36,8 +36,6 @@
 using std::atomic;
 using std::numeric_limits;
 
-//# include "Encoders/AS5047D.h"
-//# include "Encoders/TLI5012B.h"
 # include "Encoders/QuadratureEncoderPdec.h"
 # include "Encoders/LinearCompositeEncoder.h"
 #if SUPPORT_DCSERVO
