@@ -179,6 +179,7 @@ private:
 	float	PIDControlSignal;							// The overall signal from the PID controller
 	float	PIDJTerm;									// P Pos term
 	float 	vel_measured;
+	float	last_vel_error = 0.0;
 
 
 	uint16_t desiredStepPhase = 0;						// The desired position of the motor

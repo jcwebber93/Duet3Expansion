@@ -41,7 +41,7 @@ GCodeResult DcServoEncoder::Init(const StringRef& reply) noexcept
 	PDEC->CTRLA.reg = ctrla;
 
 	Enable();
-	return GCodeResult::ok;
+	return GCodeResult::ok;	
 }
 
 void DcServoEncoder::Enable() noexcept
@@ -67,7 +67,8 @@ bool DcServoEncoder::TakeReading() noexcept
 	currentCount = GetRelativePosition(err);
 	// currentPhasePosition is not used for a DC servo, but clear it for safety.
 	currentPhasePosition = 0;
-	return err;
+	// Return true on success, false on error, as per the base Encoder contract
+	return !err;
 }
 
 void DcServoEncoder::ClearFullRevs() noexcept

@@ -36,8 +36,8 @@
 using std::atomic;
 using std::numeric_limits;
 
-# include "Encoders/AS5047D.h"
-# include "Encoders/TLI5012B.h"
+//# include "Encoders/AS5047D.h"
+//# include "Encoders/TLI5012B.h"
 # include "Encoders/QuadratureEncoderPdec.h"
 # include "Encoders/LinearCompositeEncoder.h"
 #if SUPPORT_DCSERVO
@@ -341,6 +341,21 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 		// We set the mode to open loop earlier in this function so no need to do it here
 		DeleteObject(encoder);
 
+		// If the magnetic encoder type was provided, check that it is valid
+		MagneticEncoderType magEncoderType(MagneticEncoderType::as5047d);
+		{
+			String<StringLength20> magneticEncoderTypeString;
+			if (parser.GetStringParam('Y', magneticEncoderTypeString.GetRef()))
+			{
+				magEncoderType = MagneticEncoderType(magneticEncoderTypeString.c_str());
+				if (!magEncoderType.IsValid())
+				{
+					reply.printf("unrecognised magnetic encoder type '%s'", magneticEncoderTypeString.c_str());
+					return GCodeResult::error;
+				}
+			}
+		}
+
 		switch (tempEncoderType)
 		{
 		case EncoderType::none:
@@ -348,19 +363,13 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 			// encoder is already nullptr
 			break;
 
-		case EncoderType::rotaryAS5047:
-			encoder = new AS5047D(tempStepsPerRev, *Platform::sharedSpi, EncoderCsPin);
+		case EncoderType::rotaryMagnetic:
+			encoder = CreateRotaryEncoder(magEncoderType, tempStepsPerRev, *Platform::sharedSpi, EncoderCsPin);
 			CreateCalibrationTask();
 			break;
 
-#if defined(SUPPORT_TLI5012B)
-		case EncoderType::rotaryTLI5012:
-			encoder = new TLI5012B(tempStepsPerRev, *Platform::sharedSpi, EncoderCsPin);
-			CreateCalibrationTask();
-			break;
-#endif
 		case EncoderType::linearComposite:
-			encoder = new LinearCompositeEncoder(tempCPR, tempStepsPerRev, *Platform::sharedSpi, EncoderCsPin);
+			encoder = new LinearCompositeEncoder(tempCPR, tempStepsPerRev, *Platform::sharedSpi, EncoderCsPin, magEncoderType);
 			CreateCalibrationTask();
 			break;
 
@@ -379,11 +388,15 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 
 		if (encoder != nullptr)
 		{
-			tuningError = encoder->MinimalTuningNeeded();
 			const GCodeResult rslt = encoder->Init(reply);
-			if (rslt == GCodeResult::ok)
+			if (rslt <= GCodeResult::warning)
 			{
+				tuningError = encoder->MinimalTuningNeeded();
 				encoder->LoadLUT(tuningError);
+			}
+			else
+			{
+				DeleteObject(encoder);
 			}
 			return rslt;
 		}
@@ -783,37 +796,34 @@ void ClosedLoop::AdjustTargetMotorSteps(float amount) noexcept
 
 void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks timeElapsed) noexcept
 {
-	float currentFraction = 0.0;
-
 	// Read the current state of the drive. Do this even if we are not in closed loop mode.
-	if (encoder != nullptr && !encoder->TakeReading())
+	if (encoder != nullptr && encoder->TakeReading())
 	{
 		// Calculate and store the current error in full steps
-		const bool wasMoving = hasMovementCommand;
+
 		hasMovementCommand = moveInstance->GetCurrentMotion(driverNumber, now, mParams);
-		
-		if (!hasMovementCommand)
+		if (hasMovementCommand)
 		{
-			mParams.speed = 0.0;
-			mParams.acceleration = 0.0;
+			if (inTorqueMode)
+			{
+				ExitTorqueMode();
+			}
+			if (samplingMode == RecordingMode::OnNextMove)
+			{
+				dataCollectionStartTicks = whenNextSampleDue = now;
+				samplingMode = RecordingMode::Immediate;
+			}
 		}
 
-		// If we are starting a new move after being idle, reset the filters and integral term to prevent a large spike on the first step.
-		if (hasMovementCommand && !wasMoving)
-		{
-			PIDITerm = 0.0;
-			errorDerivativeFilter.Reset();
-			speedFilter.Reset();
-		}
 		const float targetEncoderReading = rintf(mParams.position * encoder->GetCountsPerStep());
 		currentPositionError = (float)(targetEncoderReading - encoder->GetCurrentCount()) * encoder->GetStepsPerCount();
-
 		errorDerivativeFilter.ProcessReading(currentPositionError, now);
 		speedFilter.ProcessReading(encoder->GetCurrentCount() * encoder->GetStepsPerCount(), now);
-		
-		if (currentMode != ClosedLoopMode::open && !stall)
+
+		float currentFraction = 0.0;
+		if (currentMode != ClosedLoopMode::open)
 		{
-			if (tuning != 0)
+			if (tuning != 0)														// if we need to tune, do it
 			{
 				// Limit the rate at which we command tuning steps. We need to do signed comparison because initially, whenLastTuningStepTaken is in the future.
 				const int32_t timeSinceLastTuningStep = (int32_t)(now - whenLastTuningStepTaken);
@@ -822,66 +832,27 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 					whenLastTuningStepTaken = now;
 					PerformTune();
 				}
-			}
-#if SUPPORT_DCSERVO
-			else if (encoder->GetType() == EncoderType::dcServo)
-			{
-				// Cascaded PID Controller for DC Servo. All velocities are in steps/tick.
-
-				// 1. Outer Position Loop (P-controller)
-				// The output is a corrective velocity in steps/tick.
-				PIDJTerm = Kpp * currentPositionError;
-
-				// 2. Feedforward Terms
-				// mParams.speed is already in steps/tick.
-				// mParams.acceleration is already in steps/tick^2.
-				PIDVTerm = Kv * mParams.speed;
-				PIDATerm = Ka * mParams.acceleration;
-
-				// 3. Calculate Target Velocity for Inner Loop
-				// This is the sum of the corrective velocity from the position loop and the velocity feedforward.
-				const float vel_target = PIDJTerm + PIDVTerm;
-				
-				// 4. Inner Velocity Loop (PID-controller)
-				// Get measured velocity in steps/tick from the encoder filter.
-				vel_measured = speedFilter.GetDerivative();
-				const float vel_error = vel_target - vel_measured;
-
-				PIDPTerm = Kp * vel_error;
-				PIDITerm = constrain<float>(PIDITerm + (Ki * vel_error * timeElapsed), -PIDIlimit, PIDIlimit);
-				PIDDTerm = Kd * (vel_error - errorDerivativeFilter.GetDerivative());	// errorDerivativeFilter is not yet updated for this loop
-
-				// 5. Final Control Signal
-				// Sum the velocity PID terms and the acceleration feedforward term.
-				PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDATerm, -256.0f, 256.0f);
-				SetDcPwm(PIDControlSignal);
-				currentFraction = fabsf(PIDControlSignal) / 256.0f; // For stats reporting
-			}
-#endif
-			else // Stepper motor
-			{
-				if (tuningError == 0)
+				else if (samplingMode == RecordingMode::OnNextMove && timeSinceLastTuningStep + (int32_t)DataCollectionIdleStepTicks >= 0)
 				{
-					currentFraction = ControlMotorCurrents(timeElapsed);				// otherwise control those motor currents!
+					dataCollectionStartTicks = whenNextSampleDue = now;
+					samplingMode = RecordingMode::Immediate;
 				}
 			}
-		}
-
-		// Stall detection logic, executed for both stepper and DC servo if in closed loop mode.
-		if (currentMode != ClosedLoopMode::open)
-		{
+			else if (tuningError == 0)
+			{
+				currentFraction = ControlMotorCurrents(timeElapsed);				// otherwise control those motor currents!
 			if (inTorqueMode)
 			{
 				stall = preStall = false;
 			}
 			else
 			{
+				// Look for a stall or pre-stall
 				const float positionErr = fabsf(currentPositionError);
 				if (stall)
 				{
-					// A stall has occurred. Motor is stopped.
-					// Reset the stall flag only when the position error falls to below half the tolerance.
-					// This requires user intervention (e.g., a new move) to clear the error.
+					// Reset the stall flag when the position error falls to below half the tolerance, to avoid generating too many stall events
+					//TODO do we need a minimum delay before resetting too?
 					if (errorThresholds[1] <= 0 || positionErr < errorThresholds[1]/2)
 					{
 						stall = false;
@@ -889,18 +860,22 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 				}
 				else
 				{
-					// Check for a new stall condition
-					preStall = errorThresholds[0] > 0 && positionErr > errorThresholds[0];
-					stall = (errorThresholds[1] > 0 && positionErr > errorThresholds[1]);
+					stall = errorThresholds[1] > 0 && positionErr > errorThresholds[1];
 					if (stall)
 					{
 						// A stall has just been detected. Stop the motor immediately.
+#if SUPPORT_DCSERVO
 						if (encoder->GetType() == EncoderType::dcServo)
 						{
 							SetDcPwm(0.0);
 						}
-						// For steppers, the next call to ControlMotorCurrents will be skipped.
+#endif
+						// For steppers, the next call to ControlMotorCurrents will be skipped by the !stall check.
 						Heat::NewDriverFault();
+						}
+						else
+						{
+							preStall = errorThresholds[0] > 0 && positionErr > errorThresholds[0];
 					}
 				}
 			}
@@ -930,6 +905,8 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 	}
 	periodSumOfCurrentFractions += currentFraction;
 	++periodNumSamples;
+	
+}
 }
 
 // Send data from the buffer to the main board over CAN
@@ -1037,6 +1014,45 @@ void ClosedLoop::CollectSample() noexcept
 // Control the motor phase currents, returning the fraction of maximum current that we commanded
 inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks ticksSinceLastCall) noexcept
 {
+#if SUPPORT_DCSERVO
+	if (encoder->GetType() == EncoderType::dcServo)
+	{
+		const float timeDelta = (float)ticksSinceLastCall * (1.0/(float)StepTimer::StepClockRate);
+		// Cascaded PID Controller for DC Servo. All velocities are in steps/tick.
+
+		// 1. Outer Position Loop (P-controller)
+		// The output is a corrective velocity in steps/tick.
+		PIDJTerm = Kpp * currentPositionError;
+
+		// 2. Feedforward Terms
+		// mParams.speed is already in steps/tick.
+		// mParams.acceleration is already in steps/tick^2.
+		PIDVTerm = Kv * mParams.speed;
+		PIDATerm = Ka * mParams.acceleration;
+
+		// 3. Calculate Target Velocity for Inner Loop
+		// This is the sum of the corrective velocity from the position loop and the velocity feedforward.
+		const float vel_target = PIDJTerm + PIDVTerm;
+
+		// 4. Inner Velocity Loop (PID-controller)
+		// Get measured velocity in steps/tick from the encoder filter.
+		vel_measured = speedFilter.GetDerivative();
+		const float vel_error = vel_target - vel_measured;
+		
+		PIDPTerm = Kp * vel_error;
+		// Use Tustin (trapezoidal) integration for a more accurate I-term
+		PIDITerm = constrain<float>(PIDITerm + (Ki * timeDelta * 0.5f * (vel_error + last_vel_error)), -PIDIlimit, PIDIlimit);
+		// Use standard backward difference for the D-term
+		PIDDTerm = (timeDelta > 0.0f) ? Kd * (vel_error - last_vel_error) / timeDelta : 0.0f;
+
+		// 5. Final Control Signal
+		// Sum the velocity PID terms and the acceleration feedforward term.
+		PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDATerm, -256.0f, 256.0f);
+		SetDcPwm(PIDControlSignal);
+		last_vel_error = vel_error; // Save the current velocity error for the next iteration
+		return fabsf(PIDControlSignal) / 256.0f; // For stats reporting
+	}
+#endif
 	uint16_t commandedStepPhase;
 	float currentFraction;
 
@@ -1154,7 +1170,7 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 	reply.catf(", encoder type %s", GetEncoderType().ToString());
 	if (encoder != nullptr)
 	{
-		if (encoder->TakeReading())
+		if (!encoder->TakeReading())
 		{
 			reply.cat(", error reading encoder\n");
 		}
@@ -1206,12 +1222,16 @@ void ClosedLoop::ResetError() noexcept
 		TaskCriticalSectionLocker lock;
 
 		// Set the target position to the current position
-		const bool err = encoder->TakeReading();
-		(void)err;		//TODO handle error
+		const bool ok = encoder->TakeReading();
+		(void)ok;		//TODO handle error
 		errorDerivativeFilter.Reset();
 		speedFilter.Reset();
 		SetTargetToCurrentPosition();
 		inTorqueMode = false;
+
+		// Explicitly clear any latched stall condition. This is the primary mechanism for recovering from a fault.
+		stall = false;
+		preStall = false;
 	}
 # else
 #  error Multi driver code not implemented
@@ -1238,8 +1258,8 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 
 			// Temporarily calibrate the encoder zero position
 			// We assume that the motor is at the position given by its microstep counter. This may not be true e.g. if it has a brake that has not been disengaged.
-			const bool err = encoder->TakeReading();
-			if (err)
+			const bool ok = encoder->TakeReading();
+			if (!ok)
 			{
 				reply.copy("Error reading encoder");
 				return false;

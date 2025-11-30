@@ -40,6 +40,7 @@
 #define SUPPORT_CLOSED_LOOP		1
 #define SUPPORT_BRAKE_PWM		1
 #define SUPPORT_DCSERVO			1
+#define SUPPORT_MT6835			0
 
 constexpr size_t NumDrivers = 1;
 constexpr size_t MaxSmartDrivers = 1;
