@@ -37,9 +37,9 @@
 #endif
 
 #if SAME5x
-constexpr uint32_t CanUserAreaDataOffset = 512 - sizeof(CanUserAreaData);
+constexpr uint32_t CanUserAreaDataOffset = CanUserAreaDataOffset_SAME5x;
 #elif SAMC21
-constexpr uint32_t CanUserAreaDataOffset = 256 - sizeof(CanUserAreaData);
+constexpr uint32_t CanUserAreaDataOffset = CanUserAreaDataOffset_SAMC21;
 #endif
 
 #if SAMC21
@@ -494,6 +494,7 @@ CanMessageBuffer *CanInterface::ProcessReceivedMessage(CanMessageBuffer *buf) no
 					{
 						const int32_t stepsWanted = buf->msg.revertPosition.finalStepCounts[index++];
 						const int32_t stepsTaken = moveInstance->GetLastMoveStepsTaken(driver);
+						//debugPrintf("Driver %u revert, wanted %ld taken %ld\n", driver, stepsWanted, stepsTaken);
 						if (((stepsWanted >= 0 && stepsTaken > stepsWanted) || (stepsWanted <= 0 && stepsTaken < stepsWanted)))
 						{
 							steps = stepsWanted - stepsTaken;
@@ -713,9 +714,9 @@ GCodeResult CanInterface::ChangeAddressAndDataRate(const CanMessageSetAddressAnd
 		{
 			CanTiming timing;
 			can0dev->GetLocalCanTiming(timing);
-			reply.printf("CAN bus speed %.1fkbps, tseg1 %.2f, jump width %.2f",
+			reply.printf("CAN bus speed %.1fkbps, sample point %.2f, jump width %.2f",
 							(double)((float)CanTiming::ClockFrequency/(1000 * timing.period)),
-							(double)((float)timing.tseg1/(float)timing.period),
+							(double)((float)(timing.tseg1 + 1)/(float)timing.period),
 							(double)((float)timing.jumpWidth/(float)timing.period));
 		}
 		return GCodeResult::ok;
