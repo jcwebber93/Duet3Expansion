@@ -106,8 +106,11 @@ void ClosedLoop::ReportTuningErrors(TuningErrors tuningErrorBitmask, const Strin
 
 void ClosedLoop::SetTargetToCurrentPosition() noexcept
 {
-	mParams.position = (float)encoder->GetCurrentCount() / encoder->GetCountsPerStep();
-	moveInstance->SetCurrentMotorSteps(driverNumber, mParams.position);
+	const float multiplier = (moveInstance->GetDirectionValueNoCheck(driverNumber)) ? 1.0f : -1.0f;
+	const float physicalSteps = (float)encoder->GetCurrentCount() * encoder->GetStepsPerCount();
+	mParams.position = physicalSteps * multiplier;
+	moveInstance->SetCurrentMotorSteps(driverNumber, mParams.position);		// expects logical, converts to physical internally
+	moveInstance->ResetDriveMovementState(driverNumber, physicalSteps);		// expects physical units directly
 }
 
 // Set the motor currents and update desiredStepPhase
@@ -229,6 +232,11 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 	size_t numThresholds = 2;
 	float tempErrorThresholds[numThresholds];
 	float tempTorquePerAmp;
+#if SUPPORT_DCSERVO
+	uint8_t tempDcOutputMode = (uint8_t)dcOutputMode;
+	float tempDcMaxCurrentTmc = dcMaxCurrentTmc;
+	uint8_t tempDcTmcPhaseSelect = dcTmcPhaseSelect;
+#endif
 
 	// Pull changed parameters
 	const bool seenT = parser.GetUintParam('T', tempEncoderType);
@@ -238,10 +246,18 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 	const bool seenE = parser.GetFloatArrayParam('E', numThresholds, tempErrorThresholds);
 	const bool seenS = parser.GetUintParam('S', tempStepsPerRev);
 	const bool seenQ = parser.GetFloatParam('Q', tempTorquePerAmp);
+#if SUPPORT_DCSERVO
+	const bool seenU = parser.GetUintParam('U', tempDcOutputMode);
+	const bool seenW = parser.GetFloatParam('W', tempDcMaxCurrentTmc);
+	const bool seenZ = parser.GetUintParam('Z', tempDcTmcPhaseSelect);
+#endif
 
 	// Report back if no parameters to change
-	if (!(seenT || seenC || seenPid || seenE || seenQ || seenS))
-	{
+	if (!(seenT || seenC || seenPid || seenE || seenQ || seenS
+#if SUPPORT_DCSERVO
+		|| seenU || seenW || seenZ
+#endif
+	)) {
 		if (encoder == nullptr)
 		{
 			reply.cat("No encoder configured");
@@ -253,6 +269,16 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 			reply.lcatf("PID parameters P=%.1f I=%.3f D=%.3f V=%.1f A=%.1f, torque constant %.2fNm/A, J=%.1f",
 						(double)Kp, (double)Ki, (double)Kd, (double)Kv, (double)Ka, (double)torquePerAmp, (double)Kpp);
 			reply.lcatf("Warning/error threshold %.2f/%.2f", (double)errorThresholds[0], (double)errorThresholds[1]);
+#if SUPPORT_DCSERVO
+			if (encoder->GetType() == EncoderType::dcServo)
+			{
+				reply.lcatf(", DC output: %s", (dcOutputMode == DcServoOutputMode::IoxPwm) ? "IOX" :
+													(dcTmcPhaseSelect == 0) ? "TMC (phase A)" : "TMC (phase B)");
+				if (dcOutputMode == DcServoOutputMode::TmcSinglePhase) {
+					reply.catf(", max current %.2fA", (double)dcMaxCurrentTmc);
+				}
+			}
+#endif
 		}
 		return GCodeResult::ok;
 	}
@@ -291,6 +317,22 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 		reply.copy("Torque per amp must be positive");
 		return GCodeResult::error;
 	}
+#if SUPPORT_DCSERVO
+	if (seenU && tempDcOutputMode > (uint8_t)DcServoOutputMode::TmcSinglePhase)
+	{
+		reply.copy("Invalid U parameter. 0=IOX, 1=TMC");
+		return GCodeResult::error;
+	}
+	if (seenW && tempDcMaxCurrentTmc <= 0.0)
+	{
+		reply.copy("W (max DC current) must be positive");
+		return GCodeResult::error;
+	}
+	if (seenZ && tempDcTmcPhaseSelect > 1)
+	{
+		reply.copy("Z (TMC phase) must be 0 or 1");
+		return GCodeResult::error;
+	}
 
 	if (seenT && tempEncoderType == EncoderType::dcServo)
 	{
@@ -298,6 +340,12 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 		// The user's M92 steps/mm should be set to the encoder's quadrature counts/mm.
 		tempStepsPerRev = tempCPR * 4;
 	}
+#endif
+
+#if SUPPORT_DCSERVO
+	// If changing DC output mode, we need to disable the driver first
+	if (seenU && (DcServoOutputMode)tempDcOutputMode != dcOutputMode)
+#endif
 
 	if (seenT)
 	{
@@ -331,6 +379,20 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 		{
 			torquePerAmp = tempTorquePerAmp;
 		}
+
+#if SUPPORT_DCSERVO
+		if (seenU || seenW || seenZ)
+		{
+			dcOutputMode = (DcServoOutputMode)tempDcOutputMode;
+			// Enforce the hard-coded maximum current limit for safety
+			dcMaxCurrentTmc = constrain<float>(tempDcMaxCurrentTmc, 0.0f, MaxDcServoTmcCurrent);
+			dcTmcPhaseSelect = tempDcTmcPhaseSelect;
+			if (dcOutputMode == DcServoOutputMode::TmcSinglePhase) {
+				SmartDrivers::SetDriverMode(driverNumber, (unsigned int)DriverMode::direct);
+				moveInstance->EnableDrive(driverNumber);
+			}
+		}
+#endif
 	}
 
 
@@ -794,15 +856,40 @@ void ClosedLoop::AdjustTargetMotorSteps(float amount) noexcept
 
 void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks timeElapsed) noexcept
 {
-	// Read the current state of the drive. Do this even if we are not in closed loop mode.
-	if (encoder != nullptr && encoder->TakeReading())
+	if (encoder == nullptr)
 	{
-		// Calculate and store the current error in full steps
+		return;
+	}
 
+	// Read the current state of the drive.
+	if (encoder->TakeReading())
+	{
+#if SUPPORT_DCSERVO
+		if (encoder->GetType() == EncoderType::dcServo)
+		{
+			// For DC servo, we handle motion parameter fetching and control inside ControlMotorCurrents
+			if (currentMode != ClosedLoopMode::open && tuning == 0 && tuningError == 0 && !stall)
+			{
+				ControlMotorCurrents(now, timeElapsed);
+			}
+		}
+		else
+#endif
+		{
+			// Calculate and store the current error in full steps
+			const bool hadMovementCommand = hasMovementCommand;
 		hasMovementCommand = moveInstance->GetCurrentMotion(driverNumber, now, mParams);
 		if (hasMovementCommand)
 		{
-			if (inTorqueMode)
+			// If this is the start of a new move sequence, we must resynchronise the target to the current position.
+			// This is because the main board's Move class will have reset its position to zero at the start of a new move,
+			// but the physical motor and encoder are still at the end of the last move.
+			if (!hadMovementCommand)
+			{
+				SetTargetToCurrentPosition();
+				moveInstance->GetCurrentMotion(driverNumber, now, mParams); // Re-fetch motion parameters based on the corrected position
+			}
+ 			if (inTorqueMode)
 			{
 				ExitTorqueMode();
 			}
@@ -813,11 +900,11 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 			}
 		}
 
-		const float targetEncoderReading = rintf(mParams.position * encoder->GetCountsPerStep());
-		currentPositionError = (float)(targetEncoderReading - encoder->GetCurrentCount()) * encoder->GetStepsPerCount();
-		errorDerivativeFilter.ProcessReading(currentPositionError, now);
-		speedFilter.ProcessReading(encoder->GetCurrentCount() * encoder->GetStepsPerCount(), now);
-
+			const float targetEncoderReading = rintf(mParams.position * encoder->GetCountsPerStep());
+			currentPositionError = (float)(targetEncoderReading - encoder->GetCurrentCount()) * encoder->GetStepsPerCount();
+			errorDerivativeFilter.ProcessReading(currentPositionError, now);
+			speedFilter.ProcessReading(encoder->GetCurrentCount() * encoder->GetStepsPerCount(), now);
+		}
 		float currentFraction = 0.0;
 		if (currentMode != ClosedLoopMode::open)
 		{
@@ -838,7 +925,7 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 			}
 			else if (tuningError == 0)
 			{
-				currentFraction = ControlMotorCurrents(timeElapsed);				// otherwise control those motor currents!
+				currentFraction = ControlMotorCurrents(now, timeElapsed); // otherwise control those motor currents!
 			if (inTorqueMode)
 			{
 				stall = preStall = false;
@@ -854,10 +941,19 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 					if (errorThresholds[1] <= 0 || positionErr < errorThresholds[1]/2)
 					{
 						stall = false;
-					}
+#if SUPPORT_DCSERVO
+						if (encoder->GetType() == EncoderType::dcServo)
+						{
+							PIDITerm = 0.0f;
+							last_vel_error = 0.0f;
+							last_filtered_D = 0.0f;
+							speedFilter.Reset();
+						}
+#endif
+				}
 				}
 				else
-				{
+			{
 					stall = errorThresholds[1] > 0 && positionErr > errorThresholds[1];
 					if (stall)
 					{
@@ -865,7 +961,13 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 #if SUPPORT_DCSERVO
 						if (encoder->GetType() == EncoderType::dcServo)
 						{
-							SetDcPwm(0.0);
+							// Prevent PID windup and spikes by clearing accumulators
+							PIDITerm = 0.0f;
+							last_vel_error = 0.0f;
+							last_filtered_D = 0.0f;
+							// On stall, immediately command zero torque to the motor.
+							// This will call the appropriate backend (IOX or TMC) to set output to zero.
+							ApplyDcTorque(0.0);
 						}
 #endif
 						// For steppers, the next call to ControlMotorCurrents will be skipped by the !stall check.
@@ -874,10 +976,10 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 						else
 						{
 							preStall = errorThresholds[0] > 0 && positionErr > errorThresholds[0];
+						}
 					}
 				}
 			}
-		}
 	}
 
 	// Collect a sample, if we need to
@@ -982,7 +1084,21 @@ void ClosedLoop::CollectSample() noexcept
 
 		if (filterRequested & CL_RECORD_RAW_ENCODER_READING) 	{ sampleBuffer.PutI32(encoder->GetCurrentCount()); }
 		if (filterRequested & CL_RECORD_CURRENT_MOTOR_STEPS) 	{ sampleBuffer.PutF32((float)encoder->GetCurrentCount() * encoder->GetStepsPerCount()); }
-		if (filterRequested & CL_RECORD_TARGET_MOTOR_STEPS)  	{ sampleBuffer.PutF32(mParams.position); }
+		if (filterRequested & CL_RECORD_TARGET_MOTOR_STEPS)
+		{
+#if SUPPORT_DCSERVO
+			// For DC servo use the raw physical position from DriveMovement, which is unaffected by the S0/S1
+			// direction setting and is directly comparable to CL_RECORD_CURRENT_MOTOR_STEPS.
+			if (encoder->GetType() == EncoderType::dcServo)
+			{
+				sampleBuffer.PutF32(moveInstance->GetTargetMotorStepsPhysical(driverNumber));
+			}
+			else
+#endif
+			{
+				sampleBuffer.PutF32(mParams.position);
+			}
+		}
 		if (filterRequested & CL_RECORD_CURRENT_ERROR) 			{ sampleBuffer.PutF32(currentPositionError); }
 		if (filterRequested & CL_RECORD_PID_CONTROL_SIGNAL)  	{ sampleBuffer.PutF16(PIDControlSignal); }
 		if (filterRequested & CL_RECORD_PID_P_TERM)  			{ sampleBuffer.PutF16(PIDPTerm); }
@@ -996,7 +1112,22 @@ void ClosedLoop::CollectSample() noexcept
 		if (filterRequested & CL_RECORD_PID_V_TERM)  			{ sampleBuffer.PutF16(PIDVTerm); }
 		if (filterRequested & CL_RECORD_PID_A_TERM)  			{ sampleBuffer.PutF16(PIDATerm); }
 		if (filterRequested & CL_RECORD_PID_J_TERM)				{ sampleBuffer.PutF16(PIDJTerm); }
-		if (filterRequested & CL_RECORD_MEASURED_VELOCITY) 		{ sampleBuffer.PutF16(vel_measured); }
+				if (filterRequested & CL_RECORD_MEASURED_VELOCITY)
+		{
+#if SUPPORT_DCSERVO
+			if (encoder->GetType() == EncoderType::dcServo)
+			{
+				// For DC Servos, convert velocity to mm/sec for charting to make it human-readable.
+				// The internal PID loop continues to use counts/tick.
+				const float vel_mm_per_sec = (vel_measured * StepTimer::StepClockRate) / moveInstance->DriveStepsPerMm(driverNumber);
+				sampleBuffer.PutF16(vel_mm_per_sec);
+			}
+			else
+#endif
+			{
+				sampleBuffer.PutF16(vel_measured);
+			}
+		}
 
 		sampleBuffer.FinishSample();
 		++samplesCollected;
@@ -1010,45 +1141,62 @@ void ClosedLoop::CollectSample() noexcept
 }
 
 // Control the motor phase currents, returning the fraction of maximum current that we commanded
-inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks ticksSinceLastCall) noexcept
+inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::Ticks ticksSinceLastCall) noexcept
 {
 #if SUPPORT_DCSERVO
 	if (encoder->GetType() == EncoderType::dcServo)
 	{
+		const float multiplier = (moveInstance->GetDirectionValueNoCheck(driverNumber)) ? 1.0f : -1.0f;
+
+		// For DC servo, we must fetch motion parameters here because the main loop bypasses it for this encoder type.
+		const bool hadMovementCommand = hasMovementCommand;
+		hasMovementCommand = moveInstance->GetCurrentMotion(driverNumber, now, mParams);
+		if (hasMovementCommand && !hadMovementCommand)
+		{
+			// Start of a new move, resynchronise target to current position
+			SetTargetToCurrentPosition();
+			// Reset velocity loop state to avoid transient spikes from stale history
+			PIDITerm = 0.0f;
+			last_vel_error = 0.0f;
+			last_filtered_D = 0.0f;
+			speedFilter.Reset();
+			moveInstance->GetCurrentMotion(driverNumber, now, mParams); // Re-fetch
+		}
+
+		// Convert logical target back to physical counts for comparison, then error back to logical space
+		const float targetPhysicalCount = (mParams.position * encoder->GetCountsPerStep()) * multiplier;
+		currentPositionError = (targetPhysicalCount - (float)encoder->GetCurrentCount()) * encoder->GetStepsPerCount() * multiplier;
+		speedFilter.ProcessReading(encoder->GetCurrentCount() * encoder->GetStepsPerCount(), now);
+
 		const float timeDelta = (float)ticksSinceLastCall * (1.0/(float)StepTimer::StepClockRate);
-		// Cascaded PID Controller for DC Servo. All velocities are in steps/tick.
 
 		// 1. Outer Position Loop (P-controller)
-		// The output is a corrective velocity in steps/tick.
 		PIDJTerm = Kpp * currentPositionError;
 
 		// 2. Feedforward Terms
-		// mParams.speed is already in steps/tick.
-		// mParams.acceleration is already in steps/tick^2.
 		PIDVTerm = Kv * mParams.speed;
 		PIDATerm = Ka * mParams.acceleration;
 
-		// 3. Calculate Target Velocity for Inner Loop
-		// This is the sum of the corrective velocity from the position loop and the velocity feedforward.
+		// 3. Calculate Target Velocity
 		const float vel_target = PIDJTerm + PIDVTerm;
 
-		// 4. Inner Velocity Loop (PID-controller)
-		// Get measured velocity in steps/tick from the encoder filter.
-		vel_measured = speedFilter.GetDerivative();
+		// 4. Inner Velocity Loop (PID)
+		// Velocity must also be converted to logical space for the PID comparison.
+		// multiplier is 1.0 for S1 (forward) and -1.0 for S0 (reverse).
+		vel_measured = speedFilter.GetDerivative() * multiplier;
 		const float vel_error = vel_target - vel_measured;
-		
 		PIDPTerm = Kp * vel_error;
-		// Use Tustin (trapezoidal) integration for a more accurate I-term
 		PIDITerm = constrain<float>(PIDITerm + (Ki * timeDelta * 0.5f * (vel_error + last_vel_error)), -PIDIlimit, PIDIlimit);
-		// Use standard backward difference for the D-term
-		PIDDTerm = (timeDelta > 0.0f) ? Kd * (vel_error - last_vel_error) / timeDelta : 0.0f;
+		const float rawD = (timeDelta > 0.0f) ? (vel_error - last_vel_error) / timeDelta : last_filtered_D;
+		last_filtered_D += 0.1f * (rawD - last_filtered_D);
+		PIDDTerm = Kd * last_filtered_D;
 
 		// 5. Final Control Signal
-		// Sum the velocity PID terms and the acceleration feedforward term.
-		PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDATerm, -256.0f, 256.0f);
-		SetDcPwm(PIDControlSignal);
-		last_vel_error = vel_error; // Save the current velocity error for the next iteration
-		return fabsf(PIDControlSignal) / 256.0f; // For stats reporting
+		PIDControlSignal = PIDPTerm + PIDITerm + PIDDTerm + PIDATerm;
+		// Apply the multiplier to the output to ensure torque direction matches the logical coordinate space.
+		ApplyDcTorque(constrain<float>((PIDControlSignal * multiplier) / 256.0f, -1.0f, 1.0f));
+		last_vel_error = vel_error;
+		return fabsf(PIDControlSignal) / 256.0f;
 	}
 #endif
 	uint16_t commandedStepPhase;
@@ -1107,21 +1255,46 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks ticksSinceLastCal
 #endif
 	}
 	else
-	{
+{
 		// Use a PID controller to calculate the required 'torque' - the control signal
 		// We choose to use a PID control signal in the range -256 to +256. This is arbitrary.
-		PIDPTerm = constrain<float>(Kp * currentPositionError, -256.0, 256.0);
-		PIDDTerm = constrain<float>(Kd * errorDerivativeFilter.GetDerivative() * StepTimer::StepClockRate, -256.0, 256.0);	// constrain D so that we can graph it more sensibly after a sudden step input
-
+		//PIDDTerm = constrain<float>(Kd * errorDerivativeFilter.GetDerivative() * StepTimer::StepClockRate, -256.0, 256.0);	// constrain D so that we can graph it more sensibly after a sudden step input
+		
 		if (currentMode == ClosedLoopMode::closed)
 		{
-			const float timeDelta = (float)ticksSinceLastCall * (1.0/(float)StepTimer::StepClockRate);						// get the time delta in seconds
-			PIDITerm = constrain<float>(PIDITerm + Ki * currentPositionError * timeDelta, -PIDIlimit, PIDIlimit);			// constrain I to prevent it running away
-			PIDVTerm = mParams.speed * Kv * ticksSinceLastCall;
-			PIDATerm = mParams.acceleration * Ka * fsquare(ticksSinceLastCall);
-			PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDVTerm + PIDATerm, -256.0, 256.0);		// clamp the sum between +/- 256
+						// For steppers, we will also use the cascaded controller.
+			// The key is to perform the velocity loop calculations in ENCODER COUNTS, not steps.
 
-			// Calculate the offset required to produce the torque in the correct direction
+			// 1. Outer Position Loop (P-controller) and Feedforward
+			// The output is a corrective velocity in steps/tick.
+			PIDJTerm = Kpp * currentPositionError;
+			PIDVTerm = Kv * mParams.speed;
+			PIDATerm = Ka * mParams.acceleration;
+
+			// 2. Calculate Target Velocity for Inner Loop
+			// Convert target velocity from steps/tick to counts/tick to match the units of the measured velocity.
+			const float vel_target_steps = PIDJTerm + PIDVTerm;
+			const float vel_target_counts = vel_target_steps / encoder->GetStepsPerCount();
+
+			// 3. Inner Velocity Loop (PID-controller)
+			// Recalculate measured velocity in counts/tick, NOT steps/tick.
+			static DerivativeAveragingFilter<SpeedFilterSize> stepperSpeedFilter;
+			stepperSpeedFilter.ProcessReading(encoder->GetCurrentCount(), now);
+			vel_measured = stepperSpeedFilter.GetDerivative();
+			const float vel_error = vel_target_counts - vel_measured;
+
+			const float timeDelta = (float)ticksSinceLastCall * (1.0/(float)StepTimer::StepClockRate);						// get the time delta in seconds
+
+			PIDPTerm = Kp * vel_error;
+			PIDITerm = constrain<float>(PIDITerm + (Ki * timeDelta * 0.5f * (vel_error + last_vel_error)), -PIDIlimit, PIDIlimit);
+			const float rawD = (timeDelta > 0.0f) ? (vel_error - last_vel_error) / timeDelta : 0.0f;
+			PIDDTerm = Kd * (0.1f * rawD + 0.9f * last_filtered_D);
+			last_filtered_D = (Kd > 0.0f) ? PIDDTerm / Kd : 0.0f;
+
+			// 4. Final Control Signal
+			PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDATerm, -256.0, 256.0);
+			last_vel_error = vel_error;
+			
 			// i.e. if we are moving in the positive direction, we must apply currents with a positive phase shift
 			// The max abs value of phase shift we want is 1 full step i.e. 25%.
 			// Given that PIDControlSignal is -256 .. 256 and phase is 0 .. 4095
@@ -1139,6 +1312,9 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks ticksSinceLastCal
 		else
 		{
 			// Driver is in assisted open loop mode
+			PIDPTerm = constrain<float>(Kp * currentPositionError, -256.0, 256.0);
+			PIDDTerm = constrain<float>(Kd * errorDerivativeFilter.GetDerivative() * StepTimer::StepClockRate, -256.0, 256.0);
+
 			// In this mode the I term is not used and the A and V terms are independent of the loop time.
 			constexpr float scalingFactor = 100.0;
 			PIDVTerm = mParams.speed * Kv * scalingFactor;
@@ -1361,6 +1537,56 @@ void ClosedLoop::ExitTorqueMode() noexcept
 	inTorqueMode = false;
 }
 
+#if SUPPORT_DCSERVO
+void ClosedLoop::ApplyDcTorque(float torque) noexcept
+{
+    switch (dcOutputMode)
+    {
+        case DcServoOutputMode::IoxPwm:
+            ApplyDcTorqueIox(torque);
+            break;
+
+        case DcServoOutputMode::TmcSinglePhase:
+            ApplyDcTorqueTmc(torque);
+            break;
+    }
+}
+
+void ClosedLoop::ApplyDcTorqueIox(float torque) noexcept
+{
+    const float clamped = constrain<float>(torque, -1.0f, 1.0f);
+    SetDcPwm(clamped * 256.0f);
+}
+
+void ClosedLoop::ApplyDcTorqueTmc(float torque) noexcept
+{
+	SmartDrivers::SetDcPhaseCurrents(driverNumber, 100, 0);
+    return;  // Skip the rest of the function
+	// Convert the normalized torque [-1.0, 1.0] to a target current
+	const float targetCurrent = constrain<float>(torque, -1.0f, 1.0f) * dcMaxCurrentTmc;
+
+	// Get the configured run current for the driver, which is used as the reference for XDIRECT
+	const float fullScaleCurrent = SmartDrivers::GetCurrent(driverNumber) * 0.001f;  // Convert mA to A
+
+	// Calculate the 9-bit signed value for the XDIRECT register.
+	// A value of 255 corresponds to the current set by IHOLD. We assume IHOLD is set to the same as IRUN.
+	const int16_t currentRegisterValue = (fullScaleCurrent > 0.0f)
+											? lrintf((targetCurrent / fullScaleCurrent) * 255.0f)
+											: 0;
+
+	if (dcTmcPhaseSelect == 0)
+	{
+		coilA = currentRegisterValue;
+		coilB = 0;
+	}
+	else
+	{
+		coilA = 0;
+		coilB = currentRegisterValue;
+	}
+	SmartDrivers::SetDcPhaseCurrents(driverNumber, coilA, coilB);
+}
+#endif
 #endif
 
 // End

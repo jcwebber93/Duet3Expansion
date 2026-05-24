@@ -46,6 +46,12 @@ enum class ClosedLoopMode
 	assistedOpen
 };
 
+enum class DcServoOutputMode : uint8_t
+{
+	IoxPwm = 0,
+	TmcSinglePhase = 1
+};
+
 class ClosedLoop
 {
 public:
@@ -155,6 +161,12 @@ private:
 	float	Ka = 0.0;											// The acceleration feedforward constant
 	float	Kpp = 1.0;											// The P for position
 
+	// DC Servo specific
+	static constexpr float MaxDcServoTmcCurrent = 4.5;			// The absolute maximum current in Amps for the TMC DC servo output mode
+	DcServoOutputMode dcOutputMode = DcServoOutputMode::IoxPwm;
+	float dcMaxCurrentTmc = 1.0;								// Max current in Amps for TMC DC servo output mode
+	uint8_t dcTmcPhaseSelect = 0;								// 0 for phase A, 1 for phase B
+
 	float 	errorThresholds[2];									// The error thresholds. [0] is pre-stall, [1] is stall
 
 	float torqueModeCommandedCurrentFraction = 0.0;		// when in torque mode, the requested torque
@@ -180,6 +192,7 @@ private:
 	float	PIDJTerm;									// P Pos term
 	float 	vel_measured;
 	float	last_vel_error = 0.0;
+	float last_filtered_D = 0.0;
 
 
 	uint16_t desiredStepPhase = 0;						// The desired position of the motor
@@ -228,7 +241,7 @@ private:
 	inline bool CollectingData() noexcept { return samplingMode != RecordingMode::None; }
 
 	void CollectSample() noexcept;
-	float ControlMotorCurrents(StepTimer::Ticks ticksSinceLastCall) noexcept;
+	float ControlMotorCurrents(StepTimer::Ticks now, StepTimer::Ticks ticksSinceLastCall) noexcept;
 	void StartTuning(uint8_t tuningType) noexcept;
 	GCodeResult ProcessBasicTuningResult(const StringRef& reply) noexcept;
 	GCodeResult ProcessCalibrationResult(const StringRef& reply) noexcept;
@@ -240,6 +253,9 @@ private:
 #if SUPPORT_DCSERVO
 	void InitDcPwm() noexcept;
 	void SetDcPwm(float controlSignal) noexcept;
+	void ApplyDcTorque(float torque) noexcept;
+	void ApplyDcTorqueIox(float torque) noexcept;
+	void ApplyDcTorqueTmc(float torque) noexcept;
 #endif
 
 	bool BasicTuning(bool firstIteration) noexcept;

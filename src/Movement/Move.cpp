@@ -99,13 +99,15 @@ void Move::Init() noexcept
 	for (size_t i = 0; i < NumDrivers; ++i)
 	{
 		dms[i].Init(i);
+#if !SUPPORT_DCSERVO || HAS_SMART_DRIVERS
 		{
 			const uint32_t driverBit = 1u << (StepPins[i] & 31);
 			dms[i].driversNormallyUsed = driverBit;
-#if !SINGLE_DRIVER
+# if !SINGLE_DRIVER
 			allDriverBits |= driverBit;
-#endif
+# endif
 		}
+#endif
 
 #if HAS_SMART_DRIVERS
 		SetMicrostepping(i, 16, true);
@@ -174,41 +176,43 @@ void Move::Init() noexcept
 		enableValues[i] = 1;
 		driverIsEnabled[i] = false;
 #else
+# if !SUPPORT_DCSERVO || HAS_SMART_DRIVERS
 		// Step pins
-# if ACTIVE_HIGH_STEP
+#  if ACTIVE_HIGH_STEP
 		IoPort::SetPinMode(StepPins[i], OUTPUT_LOW);
-# else
+#  else
 		IoPort::SetPinMode(StepPins[i], OUTPUT_HIGH);
-# endif
-# if !HAS_SMART_DRIVERS
+#  endif
+#  if !HAS_SMART_DRIVERS
 		SetDriveStrength(StepPins[i], 2);
-# endif
-# if RP2040
+#  endif
+#  if RP2040
 		SetPinFunction(StepPins[i], GpioPinFunction::Sio);			// enable fast stepping - must do this after the call to SetPinMode
-# endif
+#  endif
 
 		// Direction pins
-# if ACTIVE_HIGH_DIR
+#  if ACTIVE_HIGH_DIR
 		IoPort::SetPinMode(DirectionPins[i], OUTPUT_LOW);
-# else
+#  else
 		IoPort::SetPinMode(DirectionPins[i], OUTPUT_HIGH);
-# endif
-# if !HAS_SMART_DRIVERS
+#  endif
+#  if !HAS_SMART_DRIVERS
 		SetDriveStrength(DirectionPins[i], 2);
-# endif
+#  endif
 
-# if !HAS_SMART_DRIVERS
+#  if !HAS_SMART_DRIVERS
 		// Enable pins
-#  if ACTIVE_HIGH_ENABLE
+#   if ACTIVE_HIGH_ENABLE
 		IoPort::SetPinMode(EnablePins[i], OUTPUT_LOW);
 		enableValues[i] = 1;
-#  else
+#   else
 		IoPort::SetPinMode(EnablePins[i], OUTPUT_HIGH);
 		enableValues[i] = 0;
-#  endif
+#   endif
 		SetDriveStrength(EnablePins[i], 2);
 		driverIsEnabled[i] = false;
-# endif
+#  endif
+# endif  // !SUPPORT_DCSERVO || HAS_SMART_DRIVERS
 #endif
 
 		enableValues[i] = 0;
@@ -549,10 +553,17 @@ bool Move::AddMove(const CanMessageMovementLinearShaped& msg) noexcept
 	{
 		if (drive < NumDrivers)
 		{
+#if SUPPORT_DCSERVO
+			// For DC servo drives, M569 S0/S1 direction is not applied at the hardware level (no step pin).
+			// Negate incoming steps so the segment direction matches the physical motor wiring.
+			const float directionSign = (dms[drive].IsDcServo() && !directions[drive]) ? -1.0f : 1.0f;
+#else
+			constexpr float directionSign = 1.0f;
+#endif
 			if ((msg.extruderDrives & (1u << drive)) != 0)
 			{
 				// It's an extruder
-				const float extrusionRequested = msg.perDrive[drive].extrusion;
+				const float extrusionRequested = msg.perDrive[drive].extrusion * directionSign;
 				if (extrusionRequested != 0.0)
 				{
 					AddLinearSegments(drive, msg.whenToExecute, params, extrusionRequested, segFlags.AddIsExtruder(), msg.usePressureAdvance);
@@ -560,7 +571,7 @@ bool Move::AddMove(const CanMessageMovementLinearShaped& msg) noexcept
 			}
 			else
 			{
-				const float delta = (float)msg.perDrive[drive].steps;
+				const float delta = (float)msg.perDrive[drive].steps * directionSign;
 				if (delta != 0.0)
 				{
 					AddLinearSegments(drive, msg.whenToExecute, params, delta, segFlags, false);
@@ -1318,7 +1329,14 @@ void Move::SetDirectionValue(size_t drive, bool dVal) noexcept
 		{
 			TaskCriticalSectionLocker lock;
 			directions[drive] = dVal;
-			InvertCurrentMotorSteps(drive);
+#if SUPPORT_DCSERVO
+			// For DC servo, direction controls how incoming CAN steps are signed (handled in AddLinearSegments).
+			// currentMotorPosition is in physical units and must NOT be inverted on a direction change.
+			if (!dms[drive].IsDcServo())
+#endif
+			{
+				InvertCurrentMotorSteps(drive);
+			}
 		}
 #else
 		directions[drive] = dVal;
@@ -1372,13 +1390,15 @@ void Move::EnableDrive(size_t driver) noexcept
 		}
 		SmartDrivers::EnableDrive(driver, true);
 # else
+#  if !SUPPORT_DCSERVO
 		if (enableValues[driver] >= 0)
 		{
 			digitalWrite(EnablePins[driver], enableValues[driver] != 0);
-#  if DIFFERENTIAL_STEPPER_OUTPUTS
+#   if DIFFERENTIAL_STEPPER_OUTPUTS
 			digitalWrite(InvertedEnablePins[driver], enableValues[driver] == 0);
-#  endif
+#   endif
 		}
+#  endif
 # endif
 
 		// If the brake is not already energised to disengage it, delay before disengaging it
@@ -1433,13 +1453,15 @@ void Move::InternalDisableDrive(size_t driver) noexcept
 # if HAS_SMART_DRIVERS
 	SmartDrivers::EnableDrive(driver, false);
 # else
+#  if !SUPPORT_DCSERVO
 	if (enableValues[driver] >= 0)
 	{
 		digitalWrite(EnablePins[driver], enableValues[driver] == 0);
-#  if DIFFERENTIAL_STEPPER_OUTPUTS
+#   if DIFFERENTIAL_STEPPER_OUTPUTS
 		digitalWrite(InvertedEnablePins[driver], enableValues[driver] != 0);
-#  endif
+#   endif
 	}
+#  endif
 # endif
 }
 

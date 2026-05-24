@@ -17,6 +17,9 @@
 DcServoEncoder::DcServoEncoder(uint32_t p_countsPerRev, uint32_t p_stepsPerRev) noexcept
 	: Encoder(1.0, p_stepsPerRev), lastCount(0), counterHigh(0), pulsesPerRev(p_countsPerRev)
 {
+	// Explicitly initialize stepper-specific base class members to prevent use of garbage values.
+	measuredCountsPerStep = 1.0;
+	measuredHysteresis = 0.0;
 }
 
 // Initialise the encoder and enable it if successful.

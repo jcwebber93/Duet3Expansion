@@ -441,6 +441,7 @@ public:
 	void GetSpiCommand(uint8_t *sendDataBlock) noexcept;
 	void GetSpiReadCommand(uint8_t *sendDataBlock) noexcept;
 	void TransferSucceeded(const uint8_t *rcvDataBlock) noexcept;
+	void SetDcPhaseCurrents(int16_t currentA, int16_t currentB) noexcept;
 	void TransferFailed() noexcept;
 
 private:
@@ -504,6 +505,7 @@ private:
 	uint32_t phaseToSet;									// phase value to be written to the XDIRECT register, only read/written by the TMC task
 #endif
 
+	uint32_t xdirectReg;
 	LocalDriversBitmap driverBit;							// a bitmap containing just this driver number
 	uint16_t minSgLoadRegister;								// the minimum value of the StallGuard bits we read
 	uint16_t numReads, numWrites;							// how many successful reads and writes we had
@@ -564,6 +566,7 @@ pre(!driversPowered)
 	specialReadRegisterNumber = specialWriteRegisterNumber = 0xFF;
 	motorCurrent = 0;
 	standstillCurrentFraction = (uint16_t)min<uint32_t>((DefaultStandstillCurrentPercent * 256)/100, 256);
+	xdirectReg = 0;
 
 	// Set default values for all registers and flag them to be updated
 	UpdateRegister(WriteGConf, DefaultGConfReg);
@@ -1081,7 +1084,7 @@ void TmcDriverState::AppendStallConfig(const StringRef& reply) const noexcept
 }
 
 // Set up the send data block to read a register
-void TmcDriverState::GetSpiReadCommand(uint8_t *sendDataBlock) noexcept
+inline void TmcDriverState::GetSpiReadCommand(uint8_t *sendDataBlock) noexcept
 {
 	if (regIndexRequested >= ReadSpecial)
 	{
@@ -1109,9 +1112,17 @@ void TmcDriverState::GetSpiReadCommand(uint8_t *sendDataBlock) noexcept
 }
 
 // In the following, on the SAME70 only byte accesses to sendDataBlock are allowed, because accesses to non-cacheable memory must be aligned
-// Inline because it is only called from one place
-inline void TmcDriverState::GetSpiCommand(uint8_t *sendDataBlock) noexcept
+void TmcDriverState::GetSpiCommand(uint8_t *sendDataBlock) noexcept
 {
+	// If in direct mode, always overwrite the next command with an XDIRECT write.
+	// This ensures the current is updated on every cycle.
+	if (GetDriverMode() == DriverMode::direct)
+	{
+		sendDataBlock[0] = REGNUM_5160_X_DIRECT | 0x80;
+		StoreBEU32(sendDataBlock + 1, xdirectReg);
+		regIndexBeingUpdated = NoRegIndex; // Don't clear any pending register updates
+		return;
+	}
 	// Find which register to send. The common case is when no registers need to be updated.
 	const uint32_t locRegistersToUpdate = (registersToUpdate |= newRegistersToUpdate.exchange(0));
 	if (locRegistersToUpdate == 0)
@@ -1133,9 +1144,18 @@ inline void TmcDriverState::GetSpiCommand(uint8_t *sendDataBlock) noexcept
 		*reinterpret_cast<uint32_t*>(sendDataBlock + 1) = __builtin_bswap32(writeRegisters[regNum]);
 #endif
 	}
+
+	// If in direct mode, always overwrite the next command with an XDIRECT write.
+	// This ensures the current is updated on every cycle.
+	if (GetDriverMode() == DriverMode::direct)
+	{
+		sendDataBlock[0] = REGNUM_5160_X_DIRECT | 0x80;
+		StoreBEU32(sendDataBlock + 1, xdirectReg);
+		regIndexBeingUpdated = NoRegIndex; // Don't clear any pending register updates
+	}
 }
 
-void TmcDriverState::TransferSucceeded(const uint8_t *rcvDataBlock) noexcept
+inline void TmcDriverState::TransferSucceeded(const uint8_t *rcvDataBlock) noexcept
 {
 	// If we wrote a register, mark it up to date
 	if (regIndexBeingUpdated <= NumWriteRegisters)
@@ -1219,7 +1239,7 @@ void TmcDriverState::TransferSucceeded(const uint8_t *rcvDataBlock) noexcept
 	previousRegIndexRequested = (regIndexBeingUpdated == NoRegIndex) ? regIndexJustRequested : NoRegIndex;
 }
 
-void TmcDriverState::TransferFailed() noexcept
+inline void TmcDriverState::TransferFailed() noexcept
 {
 	regIndexJustRequested = previousRegIndexRequested = NoRegIndex;
 }
@@ -1821,6 +1841,20 @@ void SmartDrivers::EnableDrive(size_t driver, bool en) noexcept
 	{
 		driverStates[driver].Enable(en);
 	}
+}
+
+void SmartDrivers::SetDcPhaseCurrents(size_t driver, int16_t currentA, int16_t currentB) noexcept
+{
+	if (driver < numTmc51xxDrivers)
+	{
+		driverStates[driver].SetDcPhaseCurrents(currentA, currentB);
+	}
+}
+
+inline void TmcDriverState::SetDcPhaseCurrents(int16_t currentA, int16_t currentB) noexcept
+{
+	// Combine the two signed 9-bit current values into the XDIRECT register format
+	xdirectReg = ((uint32_t)(currentB & 0x1FF) << 16) | (uint32_t)(currentA & 0x1FF);
 }
 
 // Set microstepping and microstep interpolation
