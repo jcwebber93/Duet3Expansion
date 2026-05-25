@@ -1,14 +1,14 @@
 /*
- * SAMME51.h
+ * DP3EXB.h
  * Custom ATSAME51G19 expansion board with generic I/O and DC servo/encoder support
  */
 
-#ifndef SRC_CONFIG_SAMME51_H_
-#define SRC_CONFIG_SAMME51_H_
+#ifndef SRC_CONFIG_DP3EXB_H_
+#define SRC_CONFIG_DP3EXB_H_
 
 #include <Hardware/PinDescription.h>
 
-#define BOARD_TYPE_NAME		"SAMME51"
+#define BOARD_TYPE_NAME		"DP3EXB"
 #define BOOTLOADER_NAME		"SAME5x"
 
 // General features
@@ -33,6 +33,8 @@
 #define SUPPORT_TMC51xx			0
 #define SUPPORT_TMC2660			0
 #define SUPPORT_TMC22xx			0
+#define SUPPORT_MT6835			0
+#define ACTIVE_HIGH_STEP		0
 
 constexpr size_t NumDrivers = 1;
 
@@ -188,4 +190,4 @@ const NvicPriority NvicPriorityPins = 3;
 const NvicPriority NvicPriorityCan  = 4;
 const NvicPriority NvicPriorityAdc  = 5;
 
-#endif /* SRC_CONFIG_SAMME51_H_ */
+#endif /* SRC_CONFIG_DP3EXB_H_ */

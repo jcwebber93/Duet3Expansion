@@ -7,8 +7,6 @@
 
 # if SUPPORT_TMC51xx
 #  include "Movement/StepperDrivers/TMC51xx.h"
-# else
-#  error Cannot support closed loop with the specified hardware
 # endif
 
 /*
@@ -528,7 +526,11 @@ void ClosedLoop::PerformTune() noexcept
 	static bool newTuningMove = true;						// indicates if a tuning move has just finished
 
 	// Check we are in direct drive mode and we have an encoder
+#if SUPPORT_TMC51xx
 	if (SmartDrivers::GetDriverMode(0) != DriverMode::direct || encoder == nullptr)
+#else
+	if (encoder == nullptr)
+#endif
 	{
 		tuningError |= TuningError::SystemError;
 		tuning = 0;

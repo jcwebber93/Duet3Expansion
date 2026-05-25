@@ -61,8 +61,6 @@ using std::numeric_limits;
 
 # if SUPPORT_TMC51xx
 #  include "Movement/StepperDrivers/TMC51xx.h"
-# else
-#  error Cannot support closed loop with the specified hardware
 # endif
 
 #define BASIC_TUNING_DEBUG	0
@@ -127,9 +125,10 @@ void ClosedLoop::SetMotorPhase(uint16_t phase, float magnitude) noexcept
 
 # if SUPPORT_TMC51xx && SINGLE_DRIVER
 	SmartDrivers::SetMotorPhases(driverNumber, (((uint32_t)(uint16_t)coilB << 16) | (uint32_t)(uint16_t)coilA) & 0x01FF01FF);
-# else
+# elif !SUPPORT_DCSERVO
 #  error Multi driver code not implemented
 # endif
+// DC servo: coil phase control not applicable; torque applied via SetDcPwm()
 }
 
 #if SUPPORT_DCSERVO
@@ -180,6 +179,7 @@ void ClosedLoop::SetDcPwm(float controlSignal) noexcept
 }
 #endif
 
+#if SUPPORT_TMC51xx
 static_assert(ClockGenGclkNumber == GclkClosedLoop);							// check that this GCLK number has been reserved
 
 static void GenerateTmcClock()
@@ -191,11 +191,14 @@ static void GenerateTmcClock()
 	SetPinFunction(ClockGenPin, ClockGenPinPeriphMode);
 	SmartDrivers::SetTmcExternalClock(15000000);
 }
+#endif
 
 // Module initialisation
 /*static*/ void ClosedLoop::Init() noexcept
 {
+#if SUPPORT_TMC51xx
 	GenerateTmcClock();															// generate the clock for the TMC2160A
+#endif
 }
 
 void ClosedLoop::InitInstance() noexcept
@@ -387,10 +390,12 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 			// Enforce the hard-coded maximum current limit for safety
 			dcMaxCurrentTmc = constrain<float>(tempDcMaxCurrentTmc, 0.0f, MaxDcServoTmcCurrent);
 			dcTmcPhaseSelect = tempDcTmcPhaseSelect;
+	#if SUPPORT_TMC51xx
 			if (dcOutputMode == DcServoOutputMode::TmcSinglePhase) {
 				SmartDrivers::SetDriverMode(driverNumber, (unsigned int)DriverMode::direct);
 				moveInstance->EnableDrive(driverNumber);
 			}
+#endif
 		}
 #endif
 	}
@@ -503,7 +508,11 @@ GCodeResult ClosedLoop::ProcessM569Point4(CanMessageGenericParser& parser, const
 		{
 			moveInstance->EnableDrive(driverNumber);			// enable the drive if it isn't already enabled
 			torqueModeDirection = (moveInstance->GetDirectionValueNoCheck(driverNumber) == (requestedTorque > 0.0));
+#if SUPPORT_TMC51xx
 			torqueModeCommandedCurrentFraction = min<float>(fabsf(requestedTorque)/(torquePerAmp * SmartDrivers::GetCurrent(driverNumber) * 0.001), 1.0);
+#else
+			torqueModeCommandedCurrentFraction = min<float>(fabsf(requestedTorque), 1.0f);
+#endif
 			torqueModeMaxSpeed = maxSpeed;
 			inTorqueMode = true;
 			return GCodeResult::ok;
@@ -626,11 +635,13 @@ GCodeResult ClosedLoop::ProcessM569Point6(CanMessageGenericParser& parser, const
 
 	// Here if this is a new command to start a tuning move
 	// Check we are in direct drive mode
+#if SUPPORT_TMC51xx
 	if (SmartDrivers::GetDriverMode(driverNumber) != DriverMode::direct)
 	{
 		reply.copy("Driver is not in direct mode");
 		return GCodeResult::error;
 	}
+#endif
 
 	if (!moveInstance->EnableIfIdle(driverNumber))
 	{
@@ -652,7 +663,11 @@ bool ClosedLoop::OkayToSetDriverIdle() const noexcept
 void ClosedLoop::UpdateStandstillCurrent() noexcept
 {
 #if SINGLE_DRIVER
+# if SUPPORT_TMC51xx
 	holdCurrentFraction = SmartDrivers::GetStandstillCurrentPercent(driverNumber) * 0.01;
+# else
+	holdCurrentFraction = 0.0;
+# endif
 #else
 # error Multi driver code not implemented
 #endif
@@ -1426,6 +1441,7 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 
 		if (currentMode == ClosedLoopMode::open)
 		{
+#if SUPPORT_TMC51xx
 			// Switching from open to closed loop mode, so set the motor phase to match the current microstep position
 			delay(10);													// delay long enough for the TMC driver to have read the microstep counter since the end of the last movement
 			const uint16_t initialStepPhase = SmartDrivers::GetMicrostepPosition(driverNumber) * 4;	// get the current coil A microstep position as 0..4095
@@ -1439,6 +1455,7 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 				return false;
 			}
 			desiredStepPhase = initialStepPhase;						// set this to be picked up later in DriverSwitchedToClosedLoop
+#endif
 		}
 
 		if (encoder->UsesBasicTuning() && (tuningError & TuningError::NeedsBasicTuning) != 0)
@@ -1476,7 +1493,9 @@ void ClosedLoop::DriverSwitchedToClosedLoop() noexcept
 		phaseOffset = (currentPhasePosition - stepPhase) & 4095;
 	}
 	desiredStepPhase = currentPhasePosition;
+#if SUPPORT_TMC51xx
 	SetMotorPhase(currentPhasePosition, SmartDrivers::GetStandstillCurrentPercent(driverNumber) * 0.01);	// set the motor currents to match the initial position using the open loop standstill current
+#endif
 	PIDITerm = 0.0;													// clear the integral term accumulator
 	errorDerivativeFilter.Reset();
 	speedFilter.Reset();
@@ -1560,6 +1579,7 @@ void ClosedLoop::ApplyDcTorqueIox(float torque) noexcept
 
 void ClosedLoop::ApplyDcTorqueTmc(float torque) noexcept
 {
+#if SUPPORT_TMC51xx
 	SmartDrivers::SetDcPhaseCurrents(driverNumber, 100, 0);
     return;  // Skip the rest of the function
 	// Convert the normalized torque [-1.0, 1.0] to a target current
@@ -1585,6 +1605,7 @@ void ClosedLoop::ApplyDcTorqueTmc(float torque) noexcept
 		coilB = currentRegisterValue;
 	}
 	SmartDrivers::SetDcPhaseCurrents(driverNumber, coilA, coilB);
+#endif
 }
 #endif
 #endif

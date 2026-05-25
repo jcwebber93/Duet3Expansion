@@ -37,8 +37,8 @@
 # include "F3PTB.h"
 #elif defined(FeatherM4CAN)
 # include "FeatherM4CAN.h"
-#elif defined(SAMME51)
-# include "SAMME51.h"
+#elif defined(DP3EXB)
+# include "DP3EXB.h"
 #else
 # error Board type not defined
 #endif

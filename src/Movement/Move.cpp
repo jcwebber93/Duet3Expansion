@@ -2074,7 +2074,11 @@ void Move::SendDriversStatus(CanMessageBuffer& buf) noexcept
 	msg->SetStandardFields(NumDrivers, true);
 	for (size_t driver = 0; driver < NumDrivers; ++driver)
 	{
+#  if HAS_SMART_DRIVERS
 		msg->closedLoopData[driver].status = GetDriverStatus(driver, false, false).AsU32();
+#  else
+		msg->closedLoopData[driver].status = GetStandardDriverStatus(driver).AsU32();
+#  endif
 		dms[driver].closedLoopControl.GetStatistics(msg->closedLoopData[driver]);
 	}
 # elif HAS_SMART_DRIVERS
