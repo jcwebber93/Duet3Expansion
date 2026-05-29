@@ -1114,27 +1114,34 @@ void ClosedLoop::CollectSample() noexcept
 				sampleBuffer.PutF32(mParams.position);
 			}
 		}
-		if (filterRequested & CL_RECORD_CURRENT_ERROR) 			{ sampleBuffer.PutF32(currentPositionError); }
-		if (filterRequested & CL_RECORD_PID_CONTROL_SIGNAL)  	{ sampleBuffer.PutF16(PIDControlSignal); }
-		if (filterRequested & CL_RECORD_PID_P_TERM)  			{ sampleBuffer.PutF16(PIDPTerm); }
-		if (filterRequested & CL_RECORD_PID_I_TERM)  			{ sampleBuffer.PutF16(PIDITerm); }
-		if (filterRequested & CL_RECORD_PID_D_TERM)  			{ sampleBuffer.PutF16(PIDDTerm); }
+		// For DC servo, logical-space values are sign-flipped when S0 direction is active. Apply dcServoMultiplier to
+		// convert them back to physical space so all chart traces are consistent with measured/target position.
+#if SUPPORT_DCSERVO
+		const float recordMultiplier = (encoder->GetType() == EncoderType::dcServo) ? dcServoMultiplier : 1.0f;
+#else
+		constexpr float recordMultiplier = 1.0f;
+#endif
+		if (filterRequested & CL_RECORD_CURRENT_ERROR) 			{ sampleBuffer.PutF32(currentPositionError * recordMultiplier); }
+		if (filterRequested & CL_RECORD_PID_CONTROL_SIGNAL)  	{ sampleBuffer.PutF16(PIDControlSignal * recordMultiplier); }
+		if (filterRequested & CL_RECORD_PID_P_TERM)  			{ sampleBuffer.PutF16(PIDPTerm * recordMultiplier); }
+		if (filterRequested & CL_RECORD_PID_I_TERM)  			{ sampleBuffer.PutF16(PIDITerm * recordMultiplier); }
+		if (filterRequested & CL_RECORD_PID_D_TERM)  			{ sampleBuffer.PutF16(PIDDTerm * recordMultiplier); }
 		if (filterRequested & CL_RECORD_CURRENT_STEP_PHASE)  	{ sampleBuffer.PutU16(encoder->GetCurrentPhasePosition()); }
 		if (filterRequested & CL_RECORD_DESIRED_STEP_PHASE)  	{ sampleBuffer.PutU16(desiredStepPhase); }
-		if (filterRequested & CL_RECORD_PHASE_SHIFT)  			{ sampleBuffer.PutF16(vel_measured); }
+		if (filterRequested & CL_RECORD_PHASE_SHIFT)  			{ sampleBuffer.PutF16(vel_measured * recordMultiplier); }
 		if (filterRequested & CL_RECORD_COIL_A_CURRENT) 		{ sampleBuffer.PutI16(coilA); }
 		if (filterRequested & CL_RECORD_COIL_B_CURRENT) 		{ sampleBuffer.PutI16(coilB); }
-		if (filterRequested & CL_RECORD_PID_V_TERM)  			{ sampleBuffer.PutF16(PIDVTerm); }
-		if (filterRequested & CL_RECORD_PID_A_TERM)  			{ sampleBuffer.PutF16(PIDATerm); }
-		if (filterRequested & CL_RECORD_PID_J_TERM)				{ sampleBuffer.PutF16(PIDJTerm); }
-				if (filterRequested & CL_RECORD_MEASURED_VELOCITY)
+		if (filterRequested & CL_RECORD_PID_V_TERM)  			{ sampleBuffer.PutF16(PIDVTerm * recordMultiplier); }
+		if (filterRequested & CL_RECORD_PID_A_TERM)  			{ sampleBuffer.PutF16(PIDATerm * recordMultiplier); }
+		if (filterRequested & CL_RECORD_PID_J_TERM)				{ sampleBuffer.PutF16(PIDJTerm * recordMultiplier); }
+		if (filterRequested & CL_RECORD_MEASURED_VELOCITY)
 		{
 #if SUPPORT_DCSERVO
 			if (encoder->GetType() == EncoderType::dcServo)
 			{
 				// For DC Servos, convert velocity to mm/sec for charting to make it human-readable.
 				// The internal PID loop continues to use counts/tick.
-				const float vel_mm_per_sec = (vel_measured * StepTimer::StepClockRate) / moveInstance->DriveStepsPerMm(driverNumber);
+				const float vel_mm_per_sec = (vel_measured * recordMultiplier * StepTimer::StepClockRate) / moveInstance->DriveStepsPerMm(driverNumber);
 				sampleBuffer.PutF16(vel_mm_per_sec);
 			}
 			else
@@ -1162,6 +1169,7 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 	if (encoder->GetType() == EncoderType::dcServo)
 	{
 		const float multiplier = (moveInstance->GetDirectionValueNoCheck(driverNumber)) ? 1.0f : -1.0f;
+		dcServoMultiplier = multiplier;									// persist for CollectSample to convert logical→physical space
 
 		// For DC servo, we must fetch motion parameters here because the main loop bypasses it for this encoder type.
 		const bool hadMovementCommand = hasMovementCommand;
@@ -1190,10 +1198,10 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 
 		// 2. Feedforward Terms
 		PIDVTerm = Kv * mParams.speed;
-		PIDATerm = Ka * mParams.acceleration;
+		PIDATerm = Ka * mParams.acceleration * (float)ticksSinceLastCall;	// steps/tick² * ticks = steps/tick, same units as vel_target
 
-		// 3. Calculate Target Velocity
-		const float vel_target = PIDJTerm + PIDVTerm;
+		// 3. Calculate Target Velocity (A feedforward is part of the velocity setpoint, not a raw torque bypass)
+		const float vel_target = PIDJTerm + PIDVTerm + PIDATerm;
 
 		// 4. Inner Velocity Loop (PID)
 		// Velocity must also be converted to logical space for the PID comparison.
@@ -1207,7 +1215,7 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 		PIDDTerm = Kd * last_filtered_D;
 
 		// 5. Final Control Signal
-		PIDControlSignal = PIDPTerm + PIDITerm + PIDDTerm + PIDATerm;
+		PIDControlSignal = PIDPTerm + PIDITerm + PIDDTerm;
 		// Apply the multiplier to the output to ensure torque direction matches the logical coordinate space.
 		ApplyDcTorque(constrain<float>((PIDControlSignal * multiplier) / 256.0f, -1.0f, 1.0f));
 		last_vel_error = vel_error;
