@@ -103,7 +103,7 @@ namespace Platform
 	bool isPrinting = false;
 	uint32_t realTime = 0;
 
-#if defined(EXP3HC) || defined(TOOL1LC) || defined(EXP1HCL) || defined(DP3EXB)
+#if defined(EXP3HC) || defined(TOOL1LC) || defined(EXP1HCL)
 	static uint8_t boardVariant = 0;
 #endif
 
@@ -243,7 +243,7 @@ namespace Platform
 		NVIC_SetPriority(StepTcIRQn, NvicPriorityStep);
 # if defined(EXP3HC) || defined(FeatherM4CAN)
 		NVIC_SetPriority(CAN1_IRQn, NvicPriorityCan);
-# elif defined(EXP1HCL) || defined(M23CL) || defined(TOOL1RR) || defined(F3PTB)	|| defined(DP3EXB)  
+# elif defined(EXP1HCL) || defined(M23CL) || defined(TOOL1RR) || defined(F3PTB)	|| defined(DP3EXB)	|| defined(SAMME51)
 		NVIC_SetPriority(CAN0_IRQn, NvicPriorityCan);
 # else
 #  error CAN interrupt not specified
@@ -431,7 +431,7 @@ namespace Platform
 		return CanId::FeatherM4CANDefaultAddress;
 #elif defined(EXP1XD)
 		return CanId::Exp1XDBoardDefaultAddress;
-#elif defined(EXP1HCL) || defined(M23CL) || defined(DP3EXB)
+#elif defined(EXP1HCL) || defined(M23CL) || defined(DP3EXB) || defined(SAMME51)
 		return CanId::Exp1HCLBoardDefaultAddress;
 #elif defined(ATECM)
 		return CanId::ATECMBoardDefaultAddress;
@@ -507,7 +507,7 @@ static void Platform::InitLeds()
 			IoPort::SetPinMode(pin, (LedActiveHigh_v102) ? OUTPUT_LOW : OUTPUT_HIGH);
 		}
 	}
-#elif !((defined(EXP1HCL) || defined(M23CL) || defined(SZP) || defined(TOOL1RR) || defined(F3PTB)) && defined(DEBUG))	|| defined(DP3EXB)	// EXP1HCL has the LEDs connected to the SWD pins
+#elif !((defined(EXP1HCL) || defined(M23CL) || defined(SZP) || defined(TOOL1RR) || defined(F3PTB)) && defined(DEBUG)) || defined(DP3EXB)	// EXP1HCL has the LEDs connected to the SWD pins
 	for (Pin pin : LedPins)
 	{
 		IoPort::SetPinMode(pin, (LedActiveHigh) ? OUTPUT_LOW : OUTPUT_HIGH);
@@ -602,7 +602,7 @@ void Platform::Init()
 	IoPort::Init();
 	EstablishBoardVariant();
 	InitLeds();
-#if defined(FeatherM4CAN)
+#if defined(FeatherM4CAN) || defined(SAMME51)
 	SetPinMode(NeoPixelPWR, OUTPUT_HIGH);
 #endif
 	// Turn all outputs off

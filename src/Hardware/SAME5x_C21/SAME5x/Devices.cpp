@@ -58,6 +58,27 @@ extern "C" void SERCOM3_3_Handler()
 	uart0.Interrupt3();
 }
 
+#elif defined(SAMME51)
+
+void SerialPortInit(AsyncSerial*) noexcept
+{
+	SetPinFunction(PortAPin(4), GpioPinFunction::D);	// PA04 TxD (SERCOM0 Mux D pad 0)
+	SetPinFunction(PortAPin(5), GpioPinFunction::D);	// PA05 RxD (SERCOM0 Mux D pad 1)
+}
+
+void SerialPortDeinit(AsyncSerial*) noexcept
+{
+	SetPinMode(PortAPin(4), INPUT_PULLUP);
+	SetPinMode(PortAPin(5), INPUT_PULLUP);
+}
+
+AsyncSerial uart0(0, 1, 512, 512, SerialPortInit, SerialPortDeinit);
+
+extern "C" void SERCOM0_0_Handler() { uart0.Interrupt0(); }
+extern "C" void SERCOM0_1_Handler() { uart0.Interrupt1(); }
+extern "C" void SERCOM0_2_Handler() { uart0.Interrupt2(); }
+extern "C" void SERCOM0_3_Handler() { uart0.Interrupt3(); }
+
 #elif defined(EXP1HCL) || defined(M23CL) || defined(FeatherM4CAN)
 
 // Set up an optional serial port on the IO1 port via SERCOM2
@@ -117,6 +138,8 @@ void DeviceInit() noexcept
 
 #if (defined(EXP1HCL) || defined(M23CL)) && USE_SERIAL_DEBUG
 	Platform::SetInterruptPriority(SERCOM2_0_IRQn, 4, NvicPriorityUart);
+#elif defined(SAMME51) && USE_SERIAL_DEBUG
+	Platform::SetInterruptPriority(SERCOM0_0_IRQn, 4, NvicPriorityUart);
 #endif
 }
 

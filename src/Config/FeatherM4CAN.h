@@ -88,24 +88,24 @@ constexpr PinDescription PinTable[] =
 	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_0,   SercomIo::none,		SercomIo::none,		2,     "pa02"       	},	// PA02
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx, 	nullptr      	},	// PA03 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_4,   SercomIo::none,		sercom0dPad0,		4,		"pa04"			},	// PA04	
-	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_5,   sercom0dPad1,		SercomIo::none,		5,		"pa05"			},	// PA05
+	{ TcOutput::tc0_1,	TccOutput::none,	AdcInput::adc0_5,   sercom0dPad1,		SercomIo::none,		5,		"pa05"			},	// PA05
 	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_6,	SercomIo::none,		SercomIo::none,		6,		"pa06"			},	// PA06
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA07 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA08 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr     	},	// PA09 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr      	},	// PA10 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA11 NC 
-	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		sercom2cPad0,		12,		"pa12"			},	// PA12
+	{ TcOutput::none,	TccOutput::tcc0_6F,	AdcInput::none,		SercomIo::none,		sercom2cPad0,		12,		"pa12"			},	// PA12
 	{ TcOutput::tc2_1,	TccOutput::none,	AdcInput::none,		sercom2cPad1,		SercomIo::none,		13,		"pa13"			},	// PA13
-	{ TcOutput::none,	TccOutput::tcc1_2G,	AdcInput::none,		SercomIo::none,		SercomIo::none,		14,		"pa14"			},	// PA14
+	{ TcOutput::none,	TccOutput::tcc2_0F,	AdcInput::none,		SercomIo::none,		SercomIo::none,		14,		"pa14"			},	// PA14
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA15 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA16 STEP
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA17 DIR
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA18 ENA
 	{ TcOutput::tc3_1,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		3,		"pa19"			},	// PA19
 	{ TcOutput::none,	TccOutput::tcc1_4F,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa20"			},	// PA20
-	{ TcOutput::none,	TccOutput::tcc1_5F,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa21"			},	// PA21
-	{ TcOutput::none,	TccOutput::tcc1_6F,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa22"	     	},	// PA22
+	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa21"			},	// PA21
+	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa22"	     	},	// PA22
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr     	},	// PA23 LED
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA24 USB D-
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA25 USB D+
