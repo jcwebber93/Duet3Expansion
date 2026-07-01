@@ -39,6 +39,12 @@
 # include "TOOLINDX.h"
 #elif defined(NODETRIX)
 # include "NodeTrix.h"
+#elif defined(FeatherM4CAN)
+# include "FeatherM4CAN.h"
+#elif defined(DP3EXB)
+# include "DP3EXB.h"
+#elif defined(SAMME51)
+# include "SAMME51.h"
 #else
 # error Board type not defined
 #endif
@@ -164,6 +170,8 @@ constexpr size_t NumDrivers = 0;
 
 #ifndef CUSTOM_THERMISTORS
 # define CUSTOM_THERMISTORS				0
+#ifndef SUPPORT_DCSERVO
+# define SUPPORT_DCSERVO				0
 #endif
 
 #endif /* SRC_CONFIG_BOARDDEF_H_ */

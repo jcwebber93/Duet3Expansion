@@ -454,9 +454,11 @@ namespace Platform
 		return CanId::ToolBoardDefaultAddress;
 #elif defined(SAMMYC21) || defined(RPI_PICO) || defined(FLY36RRF)
 		return CanId::SammyC21DefaultAddress;
+#elif defined(FeatherM4CAN)
+		return CanId::FeatherM4CANDefaultAddress;
 #elif defined(EXP1XD)
 		return CanId::Exp1XDBoardDefaultAddress;
-#elif defined(EXP1HCL) || defined(M23CL)
+#elif defined(EXP1HCL) || defined(M23CL) || defined(DP3EXB) || defined(SAMME51)
 		return CanId::Exp1HCLBoardDefaultAddress;
 #elif defined(ATECM)
 		return CanId::ATECMBoardDefaultAddress;
@@ -536,7 +538,7 @@ static void Platform::InitLeds()
 			IoPort::SetPinMode(pin, (LedActiveHigh_v102) ? OUTPUT_LOW : OUTPUT_HIGH);
 		}
 	}
-#elif !((defined(EXP1HCL) || defined(M23CL) || defined(SZP) || defined(TOOL1RR) || defined(F3PTB)) && defined(DEBUG))		// EXP1HCL has the LEDs connected to the SWD pins
+#elif !((defined(EXP1HCL) || defined(M23CL) || defined(SZP) || defined(TOOL1RR) || defined(F3PTB)) && defined(DEBUG)) || defined(DP3EXB)	// EXP1HCL has the LEDs connected to the SWD pins
 	for (Pin pin : LedPins)
 	{
 		IoPort::SetPinMode(pin, (LedActiveHigh) ? OUTPUT_LOW : OUTPUT_HIGH);
@@ -646,6 +648,9 @@ void Platform::Init()
 	inductiveHeaterPort.Init();
 #endif
 
+#if defined(FeatherM4CAN) || defined(SAMME51)
+	SetPinMode(NeoPixelPWR, OUTPUT_HIGH);
+#endif
 	// Turn all outputs off
 	for (size_t pin = 0; pin < ARRAY_SIZE(PinTable); ++pin)
 	{

@@ -5,14 +5,12 @@
  *      Author: David
  */
 
-#ifndef SRC_CONFIG_EXP1HCLV1_0_H_
-#define SRC_CONFIG_EXP1HCLV1_0_H_
+#ifndef SRC_CONFIG_PINS_FEATHERM4CAN_H_
+#define SRC_CONFIG_PINS_FEATHERM4CAN_H_
 
 #include <Hardware/PinDescription.h>
-#include <SPI/SpiParameters.h>
-#include <I2C/I2cParameters.h>
 
-#define BOARD_TYPE_NAME		"EXP1HCL"
+#define BOARD_TYPE_NAME		"FeatherM4CAN"
 #define BOOTLOADER_NAME		"SAME5x"
 
 // General features
@@ -39,84 +37,58 @@
 #define SUPPORT_TMC2660			0
 #define SUPPORT_TMC22xx			0
 #define SUPPORT_INPUT_SHAPING	1
-#define SUPPORT_CLOSED_LOOP		1
+#define SUPPORT_CLOSED_LOOP		0
 #define SUPPORT_BRAKE_PWM		1
-#define SUPPORT_DCSERVO			1
-#define SUPPORT_MT6835			1
 
-#define SUPPORT_MT6835					1
-#define SUPPORT_QUADRATURE_ENCODER		1
-#define SUPPORT_COMPOSITE_ENCODER		1
-
-// DMA channel assignments
-constexpr DmaChannel DmacChanTmcTx = 0;
-constexpr DmaChannel DmacChanTmcRx = 1;
-constexpr DmaChannel DmacChanLedTx = 2;
-constexpr DmaChannel DmacChanSspiTx = 3;
-constexpr DmaChannel DmacChanSspiRx = 4;
-
-constexpr unsigned int NumDmaChannelsUsed = 5;			// must be at least the number of channels used, may be larger. Max 12 on the SAME5x.
-
-constexpr DmaPriority DmacPrioTmcTx = 0;
-constexpr DmaPriority DmacPrioTmcRx = 3;
-constexpr DmaPriority DmacPrioLed = 1;
-constexpr DmaPriority DmacPrioSspiTx = 0;
-constexpr DmaPriority DmacPrioSspiRx = 3;
-
-// Interrupt priorities, lower means higher priority. 0-2 can't make RTOS calls.
-const NvicPriority NvicPriorityStep = 3;				// step interrupt is next highest, it can preempt most other interrupts
-const NvicPriority NvicPriorityDmac = 3;				// priority for DMA complete interrupts
-const NvicPriority NvicPriorityUart = 3;				// serial driver makes RTOS calls
-const NvicPriority NvicPriorityI2C = 3;
-const NvicPriority NvicPriorityPins = 3;				// priority for GPIO pin interrupts
-const NvicPriority NvicPriorityCan = 4;
-const NvicPriority NvicPriorityAdc = 5;
-
-// Stepper drivers
 constexpr size_t NumDrivers = 1;
 constexpr size_t MaxSmartDrivers = 1;
-constexpr float MaxMotorCurrent = 6300.0;					// the maximum current we allow the TMC5160/5161 drivers to be set to in open loop mode
+constexpr float MaxTmc5160Current = 6300.0;					// the maximum current we allow the TMC5160/5161 drivers to be set to in open loop mode
 constexpr uint32_t DefaultStandstillCurrentPercent = 71;
 constexpr float Tmc5160SenseResistor = 0.050;
 
-constexpr Pin GlobalTmcEnablePin = PortAPin(5);
-constexpr Pin GlobalTmcCSPin = PortAPin(10);
+constexpr Pin GlobalTmc51xxEnablePin = PortAPin(5);
+constexpr Pin GlobalTmc51xxCSPin = PortAPin(10);
 
-#define TMC_USES_SERCOM	1
-Sercom * const SERCOM_TMC = SERCOM0;
-constexpr uint8_t TmcSercomNumber = 0;
+#define TMC51xx_USES_SERCOM	1
+Sercom * const SERCOM_TMC51xx = SERCOM0;
+constexpr uint8_t SERCOM_TMC51xx_NUMBER = 0;
 
-constexpr Pin TMCMosiPin = PortAPin(8);
-constexpr Pin TMCSclkPin = PortAPin(9);
-constexpr Pin TMCMisoPin = PortAPin(11);
-constexpr GpioPinFunction TMCSpiPinsPeriphMode = GpioPinFunction::C;
+constexpr Pin TMC51xxMosiPin = PortAPin(8);
+constexpr GpioPinFunction TMC51xxMosiPinPeriphMode = GpioPinFunction::C;
+constexpr Pin TMC51xxSclkPin = PortAPin(9);
+constexpr GpioPinFunction TMC51xxSclkPinPeriphMode = GpioPinFunction::C;
+constexpr Pin TMC51xxMisoPin = PortAPin(11);
+constexpr GpioPinFunction TMC51xxMisoPinPeriphMode = GpioPinFunction::C;
 
-PortGroup * const StepPio = &(PORT->Group[1]);				// the PIO that all the step pins are on (port B)
-constexpr Pin StepPins[NumDrivers] = { PortBPin(23) };
-constexpr Pin DirectionPins[NumDrivers] = { PortAPin(27) };
-constexpr Pin DiagPins[NumDrivers] = { PortAPin(21) };
+PortGroup * const StepPio = &(PORT->Group[0]);				// the PIO that all the step pins are on (port B)
+constexpr Pin StepPins[NumDrivers] = { PortAPin(16) };
+constexpr Pin DirectionPins[NumDrivers] = { PortAPin(17) };
+constexpr Pin DiagPins[NumDrivers] = { PortAPin(18) };
 
 #define SUPPORT_THERMISTORS		1
 #define SUPPORT_SPI_SENSORS		1
 #define SUPPORT_DMA_NEOPIXEL	0
 
 #ifdef DEBUG
-# define NUM_I2C_CHANNELS		0							// in debug mode the SERCOM is used for debugging
+# define SUPPORT_I2C_SENSORS	0							// in debug mode the SERCOM is used for debugging
 # define SUPPORT_LIS3DH			0
 #else
-# define NUM_I2C_CHANNELS		1
+# define SUPPORT_I2C_SENSORS	1
 # define SUPPORT_LIS3DH			1
 #endif
 
-#define NUM_SHARED_SPI			1
-#define NUM_ASYNC_PORTS			0
+#define SUPPORT_DHT_SENSOR		0
+#define NUM_SERIAL_PORTS		0
 
 #define USE_MPU					0
 #define USE_CACHE				1
 
-constexpr unsigned int CANInstanceNumber = 0;
-constexpr bool UseLaterCanPins = false;
-
+constexpr bool UseAlternateCanPins = true;
+constexpr Pin CanTxPin = PortBPin(14);
+constexpr Pin CanRxPin = PortBPin(15);
+constexpr Pin CanStandbyPin = PortBPin(12);    // PB12
+constexpr Pin CanBoostEnablePin = PortBPin(13); // PB13
+constexpr GpioPinFunction CanPinsMode = GpioPinFunction::H;
 constexpr size_t MaxPortsPerHeater = 1;
 
 constexpr size_t NumThermistorInputs = 2;
@@ -130,8 +102,8 @@ constexpr Pin VssaPin = PortBPin(9);
 constexpr Pin BoardTypePin = PortAPin(3);
 
 // Diagnostic LEDs
-constexpr Pin LedPins[] = { PortAPin(30), PortAPin(31) };
-constexpr bool LedActiveHigh = false;
+constexpr Pin LedPins[] = { PortAPin(23) };
+constexpr bool LedActiveHigh = true;
 
 constexpr Pin VinMonitorPin = PortAPin(2);
 constexpr Pin V12MonitorPin = PortAPin(6);
@@ -145,28 +117,27 @@ constexpr Pin ButtonPins[] = { PortAPin(20) };
 
 // Encoder and quadrature decoder interface
 constexpr Pin EncoderCsPin = PortAPin(18);
-constexpr Pin MT6835CalPin = PortAPin(0);					// Pin spi.cs1 drives CAL on the MT6835 encoder board (version 2 EXP1HCL boards only)
 
-#if NUM_I2C_CHANNELS != 0
+#if SUPPORT_I2C_SENSORS
 
 // I2C using pins PA12,13
-constexpr I2cParameters I2C0Params =
-{
-	.sercomNumber = 2,
-	.sclPin = PortAPin(13),
-	.sdaPin = PortAPin(12),
-	.pinFunction = GpioPinFunction::C,
-	.irqPriority = NvicPriorityI2C
-};
+constexpr uint8_t I2CSercomNumber = 2;
+constexpr Pin I2CSDAPin = PortAPin(12);
+constexpr GpioPinFunction I2CSDAPinPeriphMode = GpioPinFunction::C;
+constexpr Pin I2CSCLPin = PortAPin(13);
+constexpr GpioPinFunction I2CSCLPinPeriphMode = GpioPinFunction::C;
+# define I2C_HANDLER0		SERCOM2_0_Handler
+# define I2C_HANDLER1		SERCOM2_1_Handler
+# define I2C_HANDLER2		SERCOM2_2_Handler
+# define I2C_HANDLER3		SERCOM2_3_Handler
 
 #endif
 
 #if SUPPORT_LIS3DH
 
-# if NUM_I2C_CHANNELS != 0
+# if SUPPORT_I2C_SENSORS
 
 #  define ACCELEROMETER_USES_SPI			(0)				// accelerometer is connected via I2C
-constexpr unsigned int Lis_I2CChannel = 0;
 constexpr Pin Lis3dhInt1Pin = PortAPin(20);					// same as io1.in
 
 # else
@@ -179,40 +150,30 @@ constexpr Pin Lis3dhInt1Pin = PortAPin(13);					// same as io1.in
 
 #endif
 
-// Shared SPI definitions
-constexpr SpiParameters SharedSpiParams =
-{
-	.sercomNumber = 1,
-	.mosiPin = PortAPin(16),
-	.misoPin = PortAPin(19),
-	.sclkPin = PortAPin(17),
-	.pinFunction = GpioPinFunction::C,
-	.dataInPad = 3,
-	.dataOutPad = 0,
-	.dmaChanTx = DmacChanSspiTx,
-	.dmaChanRx = DmacChanSspiRx,
-	.dmaPrioTx = DmacPrioSspiTx,
-	.dmaPrioRx = DmacPrioSspiRx,
-};
+// Shared SPI (used for interface to encoders, not for temperature sensors)
+constexpr uint8_t SspiSercomNumber = 1;
+constexpr uint32_t SspiDataInPad = 3;
+constexpr Pin SSPIMosiPin = PortAPin(16);
+constexpr GpioPinFunction SSPIMosiPinPeriphMode = GpioPinFunction::C;
+
+constexpr Pin SSPISclkPin = PortAPin(17);
+constexpr GpioPinFunction SSPISclkPinPeriphMode = GpioPinFunction::C;
+
+constexpr Pin SSPIMisoPin = PortAPin(19);
+constexpr GpioPinFunction SSPIMisoPinPeriphMode = GpioPinFunction::C;
 
 // Position decoder
 constexpr Pin PositionDecoderPins[] = { PortAPin(24), PortAPin(25), PortBPin(22) };
 constexpr GpioPinFunction PositionDecoderPinFunction = GpioPinFunction::G;
 
 // Clock generator pin for TMC2160
-constexpr uint8_t TmcClockGclkNumber = 5;
-constexpr Pin TmcClockPin = PortBPin(11);
-constexpr GpioPinFunction TmcClockPinPeriphMode = GpioPinFunction::M;
+constexpr uint8_t ClockGenGclkNumber = 5;
+constexpr Pin ClockGenPin = PortBPin(11);
+constexpr GpioPinFunction ClockGenPinPeriphMode = GpioPinFunction::M;
 
 // Brake On pin for version 2.0 board. If the BrakePwmPort is configured as the brake pin in M569.7 then the BrakeOnPin is used implicitly as well.
 constexpr Pin BrakePwmPin = PortBPin(10);
 constexpr Pin BrakeOnPin = PortAPin(20);
-
-#if SUPPORT_DCSERVO
-// Pins for DC servo PWM control
-constexpr Pin DcServoFwdPin = PortBPin(2);		// io0.out
-constexpr Pin DcServoRevPin = PortAPin(12);		// io1.out
-#endif
 
 constexpr auto sercom2cPad0 = SercomIo::sercom2c + SercomIo::pad0;
 constexpr auto sercom2cPad1 = SercomIo::sercom2c + SercomIo::pad1;
@@ -234,7 +195,7 @@ constexpr PinDescription PinTable[] =
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,	nullptr			},	// PA09 driver SCLK
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,	nullptr			},	// PA10 driver CS
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,	nullptr			},	// PA11 driver MISO
-	{ TcOutput::none,	TccOutput::tcc1_2G,	AdcInput::none,		SercomIo::none,		sercom2cPad0,		Nx,	nullptr 		},	// PA12 IO1 out, I2C capable
+	{ TcOutput::none,	TccOutput::tcc1_2G,	AdcInput::none,		SercomIo::none,		sercom2cPad0,		Nx,	"io1.out" 		},	// PA12 IO1 out, I2C capable
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		sercom2cPad1,		SercomIo::none,		13,	"io1.in"		},	// PA13 IO1 in, I2C capable
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,	nullptr			},	// PA14 crystal
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,	nullptr			},	// PA15 crystal
@@ -258,7 +219,7 @@ constexpr PinDescription PinTable[] =
 	// Port B
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,	nullptr			},	// PB00 not on chip
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,	nullptr			},	// PB01 not on chip
-	{ TcOutput::none,	TccOutput::tcc2_2F,	AdcInput::none,		SercomIo::none,		SercomIo::sercom5d,	Nx,	nullptr			},	// PB02 IO0 out, UART available
+	{ TcOutput::none,	TccOutput::tcc2_2F,	AdcInput::none,		SercomIo::none,		SercomIo::sercom5d,	Nx,	"io0.out"		},	// PB02 IO0 out, UART available
 	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_15,	SercomIo::sercom5d,	SercomIo::none,		3,	"io0.in"		},	// PB03 IO0 in, UART available
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,	nullptr			},	// PB04 not on chip
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,	nullptr			},	// PB05 not on chip
@@ -295,4 +256,26 @@ constexpr unsigned int StepTcNumber = 0;
 // Available UART ports
 #define NUM_SERIAL_PORTS		0
 
-#endif /* SRC_CONFIG_EXP1HCLV1_0_H_ */
+// DMA channel assignments
+constexpr DmaChannel DmacChanTmcTx = 0;
+constexpr DmaChannel DmacChanTmcRx = 1;
+constexpr DmaChannel DmacChanAdc0Rx = 2;
+constexpr DmaChannel DmacChanLedTx = 3;
+
+constexpr unsigned int NumDmaChannelsUsed = 4;			// must be at least the number of channels used, may be larger. Max 12 on the SAME5x.
+
+constexpr DmaPriority DmacPrioTmcTx = 0;
+constexpr DmaPriority DmacPrioTmcRx = 3;
+constexpr DmaPriority DmacPrioAdcRx = 2;
+constexpr DmaPriority DmacPrioLed = 1;
+
+// Interrupt priorities, lower means higher priority. 0-2 can't make RTOS calls.
+const NvicPriority NvicPriorityStep = 3;				// step interrupt is next highest, it can preempt most other interrupts
+const NvicPriority NvicPriorityUart = 3;				// serial driver makes RTOS calls
+const NvicPriority NvicPriorityI2C = 3;
+const NvicPriority NvicPriorityPins = 3;				// priority for GPIO pin interrupts
+const NvicPriority NvicPriorityCan = 4;
+const NvicPriority NvicPriorityDmac = 5;				// priority for DMA complete interrupts
+const NvicPriority NvicPriorityAdc = 5;
+
+#endif /* SRC_CONFIG_PINS_FEATHERM4CAN_H_ */

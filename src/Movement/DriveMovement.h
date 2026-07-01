@@ -50,6 +50,14 @@ public:
 
 	DriveMovement() noexcept { }
 	void Init(size_t drv) noexcept;
+	void ResetState(float newPosition) noexcept
+	{
+		distanceCarriedForwards = 0.0;
+		// This is the critical fix: unconditionally reset the move's starting position reference.
+		positionAtMoveStart = lrintf(newPosition);
+		currentMotorPosition = positionAtMoveStart;
+		positionAtSegmentStart = positionAtMoveStart;
+	}
 
 	bool CalcNextStepTime(uint32_t now) noexcept SPEED_CRITICAL;
 
@@ -65,6 +73,15 @@ public:
 	// Get the current position relative to the start of this move, speed and acceleration. Units are microsteps and step clocks.
 	// Return true if this drive is moving. Segments are advanced as necessary.
 	bool GetCurrentMotion(uint32_t when, MotionParameters& mParams) noexcept;
+
+#if SUPPORT_DCSERVO
+	bool IsDcServo() const noexcept { return closedLoopControl.GetEncoderType() == EncoderType::dcServo; }
+#else
+	bool IsDcServo() const noexcept { return false; }
+#endif
+
+	// Returns the current target position in physical (internal) units, unaffected by the S0/S1 direction setting.
+	float GetTargetMotorStepsPhysical() const noexcept { return (float)currentMotorPosition + (float)distanceCarriedForwards; }
 #endif
 
 	static int32_t GetAndClearMaxStepsLate() noexcept;
@@ -128,6 +145,8 @@ private:
 	ClosedLoop closedLoopControl;
 #endif
 };
+
+
 
 // Calculate and store the time since the start of the move when the next step for the specified DriveMovement is due.
 // Return true if there are more steps to do. When finished, leave nextStep == totalSteps + 1 and state == DMState::idle.

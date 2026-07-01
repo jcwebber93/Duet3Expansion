@@ -20,7 +20,11 @@ unsigned int AppGetXoscFrequency() noexcept
 // Return the XOSC number
 unsigned int AppGetXoscNumber() noexcept
 {
+#ifdef FeatherM4CAN
+	return 1; // Indicates XOSC1 is used
+#else
 	return 0;
+#endif
 }
 
 #endif

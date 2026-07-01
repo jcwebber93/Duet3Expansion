@@ -26,8 +26,8 @@
 # include "AxisShaper.h"
 #endif
 
-#if SUPPORT_CLOSED_LOOP
-# include "StepperDrivers/TMC51xx.h"						// for SmartDrivers::GetMicrostepShift
+#if SUPPORT_CLOSED_LOOP && SUPPORT_TMC51xx
+# include "StepperDrivers/TMC51xx.h"				// for SmartDrivers::GetMicrostepShift
 #endif
 
 struct CanMessageStopMovement;
@@ -169,6 +169,8 @@ public:
 	bool GetCurrentMotion(size_t driver, uint32_t when, MotionParameters& mParams) noexcept;	// get the net full steps taken, including in the current move so far, also speed and acceleration; return true if moving
 	void SetCurrentMotorSteps(size_t driver, float fullSteps) noexcept;
 	void InvertCurrentMotorSteps(size_t driver) noexcept;
+	void ResetDriveMovementState(size_t driver, float newPosition) noexcept;
+	float GetTargetMotorStepsPhysical(size_t driver) const noexcept;
 
 	void PhaseStepControlLoop() noexcept;
 	void ClosedLoopDiagnostics(size_t driver, const StringRef& reply) noexcept;
@@ -276,7 +278,11 @@ private:
 #if SINGLE_DRIVER
 	void SetDirection(bool direction) noexcept;										// set the direction of a driver, observing timing requirements
 
+# if !SUPPORT_DCSERVO || HAS_SMART_DRIVERS
 	static constexpr uint32_t allDriverBits = 1u << (StepPins[0] & 31);
+# else
+	static constexpr uint32_t allDriverBits = 0;	// DC servo: no step pin; step ISR never fires
+# endif
 #else
 	void SetDirection(size_t axisOrExtruder, bool direction) noexcept;				// set the direction of a driver, observing timing requirements
 	void InsertDM(DriveMovement *dm) noexcept;										// insert a DM into the active list, keeping it in step time order
@@ -469,21 +475,21 @@ inline void Move::StepDriversHigh(uint32_t driverMap) noexcept
 
 inline void Move::SetDirection(bool direction) noexcept
 {
-# if DIFFERENTIAL_STEPPER_OUTPUTS || ACTIVE_HIGH_DIR
-	// Active high direction signal
-	const bool d = (direction) ? directions[0] : !directions[0];
-# else
-	// Active low direction signal
-	const bool d = (direction) ? !directions[0] : directions[0];
-# endif
-
 # if SUPPORT_CLOSED_LOOP
 	if (dms[0].closedLoopControl.IsClosedLoopEnabled())
 	{
 		return;
 	}
 # endif
-# if SUPPORT_SLOW_DRIVERS
+# if !SUPPORT_DCSERVO || HAS_SMART_DRIVERS
+#  if DIFFERENTIAL_STEPPER_OUTPUTS || ACTIVE_HIGH_DIR
+	// Active high direction signal
+	const bool d = (direction) ? directions[0] : !directions[0];
+#  else
+	// Active low direction signal
+	const bool d = (direction) ? !directions[0] : directions[0];
+#  endif
+#  if SUPPORT_SLOW_DRIVERS
 	if (isSlowDriver)
 	{
 #  if USE_TC_FOR_STEP
@@ -503,6 +509,7 @@ inline void Move::SetDirection(bool direction) noexcept
 		lastDirChangeTime = StepTimer::GetTimerTicks();
 	}
 # endif
+# endif  // !SUPPORT_DCSERVO || HAS_SMART_DRIVERS
 }
 
 #else
@@ -579,25 +586,63 @@ inline __attribute__((always_inline)) uint32_t Move::GetStepInterval(size_t driv
 inline bool Move::GetCurrentMotion(size_t driver, uint32_t when, MotionParameters& mParams) noexcept
 {
 	const bool ret = dms[driver].GetCurrentMotion(when, mParams);
-	const float multiplier = ldexpf((GetDirectionValueNoCheck(driver)) ? -1.0 : 1.0, -(int)SmartDrivers::GetMicrostepShift(driver));
 
-	// Convert microsteps to full steps
-	mParams.position *= multiplier;
-	mParams.speed *= multiplier;
-	mParams.acceleration *= multiplier;
+	if (dms[driver].IsDcServo())
+	{
+		const float multiplier = (GetDirectionValueNoCheck(driver)) ? 1.0 : -1.0;
+		mParams.position *= multiplier;
+		mParams.speed *= multiplier;
+		mParams.acceleration *= multiplier;
+	}
+	else
+	{
+		// For a stepper motor, convert microsteps to full steps
+#if SUPPORT_TMC51xx
+		const float multiplier = ldexpf((GetDirectionValueNoCheck(driver)) ? -1.0 : 1.0, -(int)SmartDrivers::GetMicrostepShift(driver));
+#else
+		const float multiplier = (GetDirectionValueNoCheck(driver)) ? -1.0f : 1.0f;
+#endif
+		mParams.position *= multiplier;
+		mParams.speed *= multiplier;
+		mParams.acceleration *= multiplier;
+	}
 	return ret;
 }
 
 inline void Move::SetCurrentMotorSteps(size_t driver, float fullSteps) noexcept
 {
-	const float multiplier = ldexpf((GetDirectionValueNoCheck(driver)) ? -1.0 : 1.0, (int)SmartDrivers::GetMicrostepShift(driver));
-	dms[driver].currentMotorPosition = lrintf(fullSteps * multiplier);
+	if (dms[driver].IsDcServo())
+	{
+		const float multiplier = (GetDirectionValueNoCheck(driver)) ? 1.0f : -1.0f;
+		dms[driver].currentMotorPosition = lrintf(fullSteps * multiplier);
+	}
+	else
+	{
+#if SUPPORT_TMC51xx
+		const float multiplier = ldexpf((GetDirectionValueNoCheck(driver)) ? -1.0f : 1.0f, (int)SmartDrivers::GetMicrostepShift(driver));
+#else
+		const float multiplier = (GetDirectionValueNoCheck(driver)) ? 1.0f : -1.0f;
+#endif
+		dms[driver].currentMotorPosition = lrintf(fullSteps * multiplier);
+	}
 }
 
 // Invert the current number of microsteps taken. Called when the driver direction control is changed.
 inline void Move::InvertCurrentMotorSteps(size_t driver) noexcept
 {
 	dms[driver].currentMotorPosition = -dms[driver].currentMotorPosition;
+}
+
+inline void Move::ResetDriveMovementState(size_t driver, float newPosition) noexcept
+{
+	// For a DC servo, this clears fields to ensure a clean state at the start of a new move
+	// This is needed because unlike steppers, the logical position is resynchronised to the physical encoder position at the start of a move.
+	dms[driver].ResetState(newPosition);
+}
+
+inline float Move::GetTargetMotorStepsPhysical(size_t driver) const noexcept
+{
+	return dms[driver].GetTargetMotorStepsPhysical();
 }
 
 #endif	// SUPPORT_CLOSED_LOOP

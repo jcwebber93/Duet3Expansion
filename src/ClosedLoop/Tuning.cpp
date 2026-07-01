@@ -7,8 +7,6 @@
 
 # if SUPPORT_TMC51xx || SUPPORT_TMC2240_SPI
 #  include "Movement/StepperDrivers/TMC51xx.h"
-# else
-#  error Cannot support closed loop with the specified hardware
 # endif
 
 /*
@@ -97,7 +95,14 @@ bool ClosedLoop::BasicTuning(bool firstIteration) noexcept
 	{
 		return true;
 	}
+#if SUPPORT_DCSERVO
 
+	// Explicitly bypass for DC servo type for clarity and safety
+	if (encoder->GetType() == EncoderType::dcServo)
+	{
+		return true;
+	}
+#endif
 	if (firstIteration)
 	{
 		state = BasicTuningState::forwardInitial;
@@ -231,7 +236,13 @@ bool ClosedLoop::EncoderCalibration(bool firstIteration) noexcept
 	{
 		return true;							// we don't do this tuning for relative encoders
 	}
-
+#if SUPPORT_DCSERVO
+	// Explicitly bypass for DC servo type for clarity and safety
+	if (encoder->GetType() == EncoderType::dcServo)
+	{
+		return true;
+	}
+#endif
 	const uint32_t currentPosition = desiredStepPhase;
 
 	if (firstIteration)
@@ -515,7 +526,11 @@ void ClosedLoop::PerformTune() noexcept
 	static bool newTuningMove = true;						// indicates if a tuning move has just finished
 
 	// Check we are in direct drive mode and we have an encoder
+#if SUPPORT_TMC51xx
 	if (SmartDrivers::GetDriverMode(0) != DriverMode::direct || encoder == nullptr)
+#else
+	if (encoder == nullptr)
+#endif
 	{
 		tuningError |= TuningError::SystemError;
 		tuning = 0;

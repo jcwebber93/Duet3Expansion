@@ -21,6 +21,7 @@ namespace SmartDrivers
 	void Exit() noexcept;
 	void Spin(bool powered) noexcept;
 	void TurnDriversOff() noexcept;
+	void SetDcPhaseCurrents(size_t driver, int16_t currentA, int16_t currentB) noexcept;
 
 	void SetCurrent(size_t driver, float current) noexcept;
 	void EnableDrive(size_t driver, bool en) noexcept;

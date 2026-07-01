@@ -46,6 +46,12 @@ enum class ClosedLoopMode
 	assistedOpen
 };
 
+enum class DcServoOutputMode : uint8_t
+{
+	IoxPwm = 0,
+	TmcSinglePhase = 1
+};
+
 class ClosedLoop
 {
 public:
@@ -75,6 +81,11 @@ public:
 	void InstanceDiagnostics(size_t driver, const StringRef& reply) noexcept;
 
 	// Methods called by the motion system
+	EncoderType GetEncoderType() const noexcept
+	{
+		return (encoder == nullptr) ? EncoderType::none : encoder->GetType();
+	}
+
 	void InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks timeElapsed) noexcept;
 	StandardDriverStatus ReadLiveStatus() const noexcept;
 	bool IsClosedLoopEnabled() const noexcept;
@@ -148,6 +159,14 @@ private:
 	float 	Kd = 0.0;											// The proportional constant for the PID controller
 	float	Kv = 1000.0;										// The velocity feedforward constant
 	float	Ka = 0.0;											// The acceleration feedforward constant
+	float	Kpp = 1.0;											// The P for position
+
+	// DC Servo specific
+	static constexpr float MaxDcServoTmcCurrent = 4.5;			// The absolute maximum current in Amps for the TMC DC servo output mode
+	DcServoOutputMode dcOutputMode = DcServoOutputMode::IoxPwm;
+	float dcMaxCurrentTmc = 1.0;								// Max current in Amps for TMC DC servo output mode
+	uint8_t dcTmcPhaseSelect = 0;								// 0 for phase A, 1 for phase B
+	float dcServoMultiplier = 1.0f;								// +1 or -1 per S0/S1 direction setting; persisted so CollectSample can convert logical→physical space
 
 	float 	errorThresholds[2];									// The error thresholds. [0] is pre-stall, [1] is stall
 
@@ -167,9 +186,14 @@ private:
 	float 	PIDPTerm;									// Proportional term
 	float 	PIDITerm = 0.0;								// Integral accumulator
 	float 	PIDDTerm;									// Derivative term
+	float	PIDVelITerm = 0.0;							// Velocity integral accumulator
 	float	PIDVTerm;									// Velocity feedforward term
 	float	PIDATerm;									// Acceleration feedforward term
 	float	PIDControlSignal;							// The overall signal from the PID controller
+	float	PIDJTerm;									// P Pos term
+	float 	vel_measured;
+	float	last_vel_error = 0.0;
+	float last_filtered_D = 0.0;
 
 
 	uint16_t desiredStepPhase = 0;						// The desired position of the motor
@@ -198,7 +222,7 @@ private:
 	// Input variables
 	volatile RecordingMode samplingMode = RecordingMode::None;	// What mode did they request? Volatile because we care about when it is written.
 	uint8_t  movementRequested;									// Which calibration movement did they request? 0=none, 1=polarity, 2=continuous
-	uint16_t filterRequested;									// What filter did they request?
+	uint32_t filterRequested;									// What filter did they request?
 	volatile uint16_t samplesRequested;							// The number of samples requested
 
 	// Derived variables
@@ -214,17 +238,11 @@ private:
 
 	static SampleBuffer sampleBuffer;							// buffer for collecting samples - shared between all drives if we have more than one
 
-	// Functions private to this module
-	EncoderType GetEncoderType() noexcept
-	{
-		return (encoder == nullptr) ? EncoderType::none : encoder->GetType();
-	}
-
 	// Return true if we are currently collecting data or primed to collect data or finishing sending data
 	inline bool CollectingData() noexcept { return samplingMode != RecordingMode::None; }
 
 	void CollectSample() noexcept;
-	float ControlMotorCurrents(StepTimer::Ticks ticksSinceLastCall) noexcept;
+	float ControlMotorCurrents(StepTimer::Ticks now, StepTimer::Ticks ticksSinceLastCall) noexcept;
 	void StartTuning(uint8_t tuningType) noexcept;
 	GCodeResult ProcessBasicTuningResult(const StringRef& reply) noexcept;
 	GCodeResult ProcessCalibrationResult(const StringRef& reply) noexcept;
@@ -233,6 +251,14 @@ private:
 	void CreateCalibrationTask() noexcept;
 
 	// Tuning methods
+#if SUPPORT_DCSERVO
+	void InitDcPwm() noexcept;
+	void SetDcPwm(float controlSignal) noexcept;
+	void ApplyDcTorque(float torque) noexcept;
+	void ApplyDcTorqueIox(float torque) noexcept;
+	void ApplyDcTorqueTmc(float torque) noexcept;
+#endif
+
 	bool BasicTuning(bool firstIteration) noexcept;
 	bool EncoderCalibration(bool firstIteration) noexcept;
 	bool Step(bool firstIteration) noexcept;

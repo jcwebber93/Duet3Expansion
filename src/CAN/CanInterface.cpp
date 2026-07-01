@@ -289,6 +289,10 @@ void CanInterface::Init(CanAddress defaultBoardAddress, unsigned int whichPort, 
 #ifdef SAMMYC21
 	SetPinMode(CanStandbyPin, OUTPUT_LOW);						// take the CAN drivers out of standby
 #endif
+#ifdef FeatherM4CAN
+	SetPinMode(CanStandbyPin, OUTPUT_LOW);
+	SetPinMode(CanBoostEnablePin, OUTPUT_HIGH);
+#endif
 
 	boardAddress = canConfigData.GetCanAddress(defaultBoardAddress);
 

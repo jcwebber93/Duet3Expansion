@@ -33,6 +33,8 @@ public:
 	void AppendDiagnostics(const StringRef& reply) noexcept override;
 	void AppendStatus(const StringRef& reply) noexcept override;
 
+	static void SetupClocks() noexcept;
+
 protected:
 	// Get the current position relative to the starting position
 	int32_t GetRelativePosition(bool& error) noexcept override;
