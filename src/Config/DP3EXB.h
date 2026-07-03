@@ -7,6 +7,8 @@
 #define SRC_CONFIG_DP3EXB_H_
 
 #include <Hardware/PinDescription.h>
+#include <SPI/SpiParameters.h>
+#include <I2C/I2cParameters.h>
 
 #define BOARD_TYPE_NAME		"DP3EXB"
 #define BOOTLOADER_NAME		"SAME5x"
@@ -33,8 +35,38 @@
 #define SUPPORT_TMC51xx			0
 #define SUPPORT_TMC2660			0
 #define SUPPORT_TMC22xx			0
+#define SUPPORT_TMC2240_SPI		0
 #define SUPPORT_MT6835			0
 #define ACTIVE_HIGH_STEP		0
+
+#define SUPPORT_MT6835					0
+#define SUPPORT_QUADRATURE_ENCODER		1
+#define SUPPORT_COMPOSITE_ENCODER		0
+
+// DMA channel assignments
+constexpr DmaChannel DmacChanTmcTx = 0;
+constexpr DmaChannel DmacChanTmcRx = 1;
+constexpr DmaChannel DmacChanAdc0Rx = 2;
+constexpr DmaChannel DmacChanSspiTx = 3;
+constexpr DmaChannel DmacChanSspiRx = 4;
+
+constexpr unsigned int NumDmaChannelsUsed = 5;
+
+constexpr DmaPriority DmacPrioTmcTx = 0;
+constexpr DmaPriority DmacPrioTmcRx = 3;
+//constexpr DmaPriority DmacPrioAdcRx = 2;
+constexpr DmaPriority DmacPrioLed = 1;
+constexpr DmaPriority DmacPrioSspiTx = 0;
+constexpr DmaPriority DmacPrioSspiRx = 3;
+
+// Interrupt priorities, lower means higher priority. 0-2 can't make RTOS calls.
+const NvicPriority NvicPriorityStep = 3;
+const NvicPriority NvicPriorityDmac = 3;
+const NvicPriority NvicPriorityUart = 3;
+const NvicPriority NvicPriorityI2C  = 3;
+const NvicPriority NvicPriorityPins = 3;
+const NvicPriority NvicPriorityCan  = 4;
+const NvicPriority NvicPriorityAdc  = 5;
 
 constexpr size_t NumDrivers = 1;
 
@@ -50,11 +82,15 @@ PortGroup * const StepPio = &(PORT->Group[0]);
 #define SUPPORT_DHT_SENSOR		0
 #define NUM_SERIAL_PORTS		0
 
+#define NUM_I2C_CHANNELS		0
+#define NUM_SHARED_SPI			1
+#define NUM_ASYNC_PORTS			0
+
 #define USE_MPU					0
 #define USE_CACHE				1
 
-// CAN0 on standard pins PA22/PA23
-constexpr bool UseAlternateCanPins = false;
+constexpr unsigned int CANInstanceNumber = 0;
+constexpr bool UseLaterCanPins = false;
 
 constexpr size_t MaxPortsPerHeater = 1;
 
@@ -78,6 +114,22 @@ constexpr Pin SSPISclkPin = PortAPin(17);
 constexpr GpioPinFunction SSPISclkPinPeriphMode = GpioPinFunction::C;
 constexpr Pin SSPIMisoPin = PortAPin(19);
 constexpr GpioPinFunction SSPIMisoPinPeriphMode = GpioPinFunction::C;
+
+// Shared SPI definitions
+constexpr SpiParameters SharedSpiParams =
+{
+	.sercomNumber = 1,
+	.mosiPin = PortAPin(16),
+	.misoPin = PortAPin(19),
+	.sclkPin = PortAPin(17),
+	.pinFunction = GpioPinFunction::C,
+	.dataInPad = 3,
+	.dataOutPad = 0,
+	.dmaChanTx = DmacChanSspiTx,
+	.dmaChanRx = DmacChanSspiRx,
+	.dmaPrioTx = DmacPrioSspiTx,
+	.dmaPrioRx = DmacPrioSspiRx,
+};
 
 // Encoder CS pin (used to deselect SPI encoders at startup, even when using PDEC)
 constexpr Pin EncoderCsPin = PortAPin(18);
@@ -171,23 +223,6 @@ constexpr unsigned int StepTcNumber = 0;
 
 #define NUM_SERIAL_PORTS	0
 
-// DMA channel assignments
-constexpr DmaChannel DmacChanTmcTx = 0;
-constexpr DmaChannel DmacChanTmcRx = 1;
-constexpr DmaChannel DmacChanAdc0Rx = 2;
-constexpr unsigned int NumDmaChannelsUsed = 3;
 
-constexpr DmaPriority DmacPrioTmcTx = 0;
-constexpr DmaPriority DmacPrioTmcRx = 3;
-constexpr DmaPriority DmacPrioAdcRx = 2;
-
-// Interrupt priorities, lower means higher priority. 0-2 can't make RTOS calls.
-const NvicPriority NvicPriorityStep = 3;
-const NvicPriority NvicPriorityDmac = 3;
-const NvicPriority NvicPriorityUart = 3;
-const NvicPriority NvicPriorityI2C  = 3;
-const NvicPriority NvicPriorityPins = 3;
-const NvicPriority NvicPriorityCan  = 4;
-const NvicPriority NvicPriorityAdc  = 5;
 
 #endif /* SRC_CONFIG_DP3EXB_H_ */

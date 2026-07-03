@@ -8,7 +8,9 @@
 #define SRC_CONFIG_PINS_FEATHERM4CAN_H_
 
 #include <Hardware/PinDescription.h>
-
+#include <SPI/SpiParameters.h>
+#include <I2C/I2cParameters.h>
+#include <UART/UartParameters.h>
 
 #define BOARD_TYPE_NAME			"FeatherM4CAN"
 #define BOOTLOADER_NAME			"SAME5x"			
@@ -38,9 +40,36 @@
 #define SUPPORT_TMC51xx			0
 #define SUPPORT_TMC2660			0
 #define SUPPORT_TMC22xx			0
+#define SUPPORT_TMC2240_SPI		0
 #define SUPPORT_TMC2208			0
 #define SUPPORT_TMC2209			0
 #define SUPPORT_TMC2240			0
+
+// DMA channel assignments
+constexpr DmaChannel DmacChanTmcTx = 0;
+constexpr DmaChannel DmacChanTmcRx = 1;
+constexpr DmaChannel DmacChanAdc0Rx = 2;
+//constexpr DmaChannel DmacChanLedTx = 3;
+constexpr DmaChannel DmacChanSspiTx = 3;
+constexpr DmaChannel DmacChanSspiRx = 4;
+
+constexpr unsigned int NumDmaChannelsUsed = 5;			// must be at least the number of channels used, may be larger. Max 12 on the SAME5x.
+
+constexpr DmaPriority DmacPrioTmcTx = 0;
+constexpr DmaPriority DmacPrioTmcRx = 3;
+//constexpr DmaPriority DmacPrioAdcRx = 2;
+constexpr DmaPriority DmacPrioLed = 1;
+constexpr DmaPriority DmacPrioSspiTx = 0;
+constexpr DmaPriority DmacPrioSspiRx = 3;
+
+// Interrupt priorities, lower means higher priority. 0-2 can't make RTOS calls.
+const NvicPriority NvicPriorityStep = 3;				// step interrupt is next highest, it can preempt most other interrupts
+const NvicPriority NvicPriorityUart = 3;				// serial driver makes RTOS calls
+const NvicPriority NvicPriorityI2C  = 3;
+const NvicPriority NvicPriorityPins = 3;				// priority for GPIO pin interrupts
+const NvicPriority NvicPriorityCan = 4;
+const NvicPriority NvicPriorityDmac = 5;				// priority for DMA complete interrupts
+const NvicPriority NvicPriorityAdc = 5;
 
 constexpr size_t NumDrivers = 1;
 
@@ -58,10 +87,15 @@ constexpr Pin EnablePins[NumDrivers] = { PortAPin(18) };
 #define SUPPORT_LDC1612			0
 #define SUPPORT_DHT_SENSOR		0
 
-#define USE_MPU					0
-#define USE_CACHE				1					
+#define NUM_I2C_CHANNELS		0
+#define NUM_SHARED_SPI			0
+#define NUM_ASYNC_PORTS			1
 
-constexpr bool UseAlternateCanPins = true;			
+#define USE_MPU					0
+#define USE_CACHE				1
+
+constexpr unsigned int CANInstanceNumber = 1;
+constexpr bool UseLaterCanPins = true;		
 constexpr Pin CanStandbyPin = PortBPin(12);    // PB12
 constexpr Pin CanBoostEnablePin = PortBPin(13); // PB13
 
@@ -71,7 +105,7 @@ constexpr Pin LedPins[] = { PortAPin(23) };
 constexpr bool LedActiveHigh = true;
 constexpr Pin NeoPixelPWR = PortBPin(3);
 
-constexpr auto sercom0dPad0 = SercomIo::sercom0d + SercomIo::pad0;
+constexpr auto sercom0dPad0 = SercomIo::sercom0d + SercomIo::pad0;	
 constexpr auto sercom0dPad1 = SercomIo::sercom0d + SercomIo::pad1;
 constexpr auto sercom2cPad0 = SercomIo::sercom2c + SercomIo::pad0;
 constexpr auto sercom2cPad1 = SercomIo::sercom2c + SercomIo::pad1;
@@ -85,7 +119,7 @@ constexpr PinDescription PinTable[] =
 	// Port A
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA00 32.768 CRYSTAL
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA01 32.768 CRYSTAL
-	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_0,   SercomIo::none,		SercomIo::none,		2,     "pa02"       	},	// PA02
+	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_0,   SercomIo::none,		SercomIo::none,		2,      "pa02"       	},	// PA02
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx, 	nullptr      	},	// PA03 NC
 	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_4,   SercomIo::none,		sercom0dPad0,		4,		"pa04"			},	// PA04	
 	{ TcOutput::tc0_1,	TccOutput::none,	AdcInput::adc0_5,   sercom0dPad1,		SercomIo::none,		5,		"pa05"			},	// PA05
@@ -164,27 +198,21 @@ constexpr unsigned int StepTcNumber = 4;
 
 // Available UART ports
 #define NUM_SERIAL_PORTS		1
+
+constexpr UartParameters Serial0Params =
+{
+	.sercomNumber = 2,
+	.rxPin = PortAPin(13),
+	.txPin = PortAPin(12),
+	.pinFunction = GpioPinFunction::C,
+	.dataInPad = 1,
+	.dataOutPad = 0,
+	.numRxSlots = 32,
+	.numTxSlots = 128
+};
+
 constexpr IRQn Serial0_IRQn = SERCOM2_0_IRQn;
 
-// DMA channel assignments
-constexpr DmaChannel DmacChanTmcTx = 0;
-constexpr DmaChannel DmacChanTmcRx = 1;
-constexpr DmaChannel DmacChanAdc0Rx = 2;
-constexpr DmaChannel DmacChanLedTx = 3;
 
-constexpr unsigned int NumDmaChannelsUsed = 4;			// must be at least the number of channels used, may be larger. Max 12 on the SAME5x.
-
-constexpr DmaPriority DmacPrioTmcTx = 0;
-constexpr DmaPriority DmacPrioTmcRx = 3;
-constexpr DmaPriority DmacPrioAdcRx = 2;
-constexpr DmaPriority DmacPrioLed = 1;
-
-// Interrupt priorities, lower means higher priority. 0-2 can't make RTOS calls.
-const NvicPriority NvicPriorityStep = 3;				// step interrupt is next highest, it can preempt most other interrupts
-const NvicPriority NvicPriorityUart = 3;				// serial driver makes RTOS calls
-const NvicPriority NvicPriorityPins = 3;				// priority for GPIO pin interrupts
-const NvicPriority NvicPriorityCan = 4;
-const NvicPriority NvicPriorityDmac = 5;				// priority for DMA complete interrupts
-const NvicPriority NvicPriorityAdc = 5;
 
 #endif /* SRC_CONFIG_PINS_FEATHERM4CAN_H_ */

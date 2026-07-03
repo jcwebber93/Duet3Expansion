@@ -170,6 +170,7 @@ constexpr size_t NumDrivers = 0;
 
 #ifndef CUSTOM_THERMISTORS
 # define CUSTOM_THERMISTORS				0
+#endif
 #ifndef SUPPORT_DCSERVO
 # define SUPPORT_DCSERVO				0
 #endif

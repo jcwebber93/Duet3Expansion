@@ -1078,7 +1078,7 @@ void TmcDriverState::AppendStallConfig(const StringRef& reply) const noexcept
 }
 
 // Set up the send data block to read a register
-inline void TmcDriverState::GetSpiReadCommand(uint8_t *sendDataBlock) noexcept
+void TmcDriverState::GetSpiReadCommand(uint8_t *sendDataBlock) noexcept
 {
 	if (regIndexRequested >= ReadSpecial)
 	{
@@ -1106,17 +1106,9 @@ inline void TmcDriverState::GetSpiReadCommand(uint8_t *sendDataBlock) noexcept
 }
 
 // In the following, on the SAME70 only byte accesses to sendDataBlock are allowed, because accesses to non-cacheable memory must be aligned
-void TmcDriverState::GetSpiCommand(uint8_t *sendDataBlock) noexcept
+// Inline because it is only called from one place
+inline void TmcDriverState::GetSpiCommand(uint8_t *sendDataBlock) noexcept
 {
-	// If in direct mode, always overwrite the next command with an XDIRECT write.
-	// This ensures the current is updated on every cycle.
-	if (GetDriverMode() == DriverMode::direct)
-	{
-		sendDataBlock[0] = REGNUM_5160_X_DIRECT | 0x80;
-		StoreBEU32(sendDataBlock + 1, xdirectReg);
-		regIndexBeingUpdated = NoRegIndex; // Don't clear any pending register updates
-		return;
-	}
 	// Find which register to send. The common case is when no registers need to be updated.
 	const uint32_t locRegistersToUpdate = (registersToUpdate |= newRegistersToUpdate.exchange(0));
 	if (locRegistersToUpdate == 0)
@@ -1138,18 +1130,9 @@ void TmcDriverState::GetSpiCommand(uint8_t *sendDataBlock) noexcept
 		*reinterpret_cast<uint32_t*>(sendDataBlock + 1) = __builtin_bswap32(writeRegisters[regNum]);
 #endif
 	}
-
-	// If in direct mode, always overwrite the next command with an XDIRECT write.
-	// This ensures the current is updated on every cycle.
-	if (GetDriverMode() == DriverMode::direct)
-	{
-		sendDataBlock[0] = REGNUM_5160_X_DIRECT | 0x80;
-		StoreBEU32(sendDataBlock + 1, xdirectReg);
-		regIndexBeingUpdated = NoRegIndex; // Don't clear any pending register updates
-	}
 }
 
-inline void TmcDriverState::TransferSucceeded(const uint8_t *rcvDataBlock) noexcept
+void TmcDriverState::TransferSucceeded(const uint8_t *rcvDataBlock) noexcept
 {
 	// If we wrote a register, mark it up to date
 	if (regIndexBeingUpdated <= NumWriteRegisters)
@@ -1233,7 +1216,7 @@ inline void TmcDriverState::TransferSucceeded(const uint8_t *rcvDataBlock) noexc
 	previousRegIndexRequested = (regIndexBeingUpdated == NoRegIndex) ? regIndexJustRequested : NoRegIndex;
 }
 
-inline void TmcDriverState::TransferFailed() noexcept
+void TmcDriverState::TransferFailed() noexcept
 {
 	regIndexJustRequested = previousRegIndexRequested = NoRegIndex;
 }
@@ -1874,7 +1857,7 @@ void SmartDrivers::EnableDrive(size_t driver, bool en) noexcept
 
 void SmartDrivers::SetDcPhaseCurrents(size_t driver, int16_t currentA, int16_t currentB) noexcept
 {
-	if (driver < numTmc51xxDrivers)
+	if (driver < numTmcDrivers)
 	{
 		driverStates[driver].SetDcPhaseCurrents(currentA, currentB);
 	}

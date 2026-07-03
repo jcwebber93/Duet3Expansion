@@ -218,17 +218,19 @@ GCodeResult LocalHeater::SetPwmFrequency(PwmFrequency freq, const StringRef& rep
 GCodeResult LocalHeater::ReportDetails(const StringRef& reply) const noexcept
 {
 	reply.printf("Heater %u pin(s) ", GetHeaterNumber());
-	ports[0].AppendPinName(reply);
-	if constexpr (MaxPortsPerHeater > 1)
+	if constexpr (MaxPortsPerHeater > 0)
 	{
-		for (size_t i = 1; i < MaxPortsPerHeater && ports[i].IsValid(); ++i)
+		ports[0].AppendPinName(reply);
+		if constexpr (MaxPortsPerHeater > 1)
 		{
-			reply.cat('+');
-			ports[i].AppendPinName(reply, false);
+			for (size_t i = 1; i < MaxPortsPerHeater && ports[i].IsValid(); ++i)
+			{
+				reply.cat('+');
+				ports[i].AppendPinName(reply, false);
+			}
 		}
+		ports[0].AppendFrequency(reply);
 	}
-
-	ports[0].AppendFrequency(reply);
 
 	if (GetSensorNumber() >= 0)
 	{

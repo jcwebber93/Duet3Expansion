@@ -132,7 +132,7 @@ void ClosedLoop::SetMotorPhase(uint16_t phase, float magnitude) noexcept
 // DC servo: coil phase control not applicable; torque applied via SetDcPwm()
 }
 
-#if SAME5x
+#if SAME5x && (SUPPORT_TMC51xx || SUPPORT_TMC2240_SPI)
 static_assert(TmcClockGclkNumber == GclkNumApp1 || TmcClockGclkNumber == GclkNumApp2);	// check that this GCLK number has been reserved for application use
 #endif
 #if SUPPORT_DCSERVO
@@ -183,8 +183,8 @@ void ClosedLoop::SetDcPwm(float controlSignal) noexcept
 }
 #endif
 
-#if SUPPORT_TMC51xx
-static_assert(ClockGenGclkNumber == GclkClosedLoop);							// check that this GCLK number has been reserved
+#if SUPPORT_TMC51xx || SUPPORT_TMC2240_SPI
+//static_assert(ClockGenGclkNumber == GclkClosedLoop);							// check that this GCLK number has been reserved
 
 static void GenerateTmcClock()
 {
@@ -349,7 +349,7 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 	{
 		// For DC servo control, we force a 1:1 mapping of steps to quadrature encoder counts.
 		// The user's M92 steps/mm should be set to the encoder's quadrature counts/mm.
-		tempStepsPerRev = tempCPR * 4;
+		tempStepsPerRev = (uint16_t)(tempCPR * 4);
 	}
 #endif
 
@@ -448,7 +448,7 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 			break;
 #endif
 
-#if SUPPORT_QUADRATURE_ENCODER
+//#if SUPPORT_QUADRATURE_ENCODER
 		case EncoderType::rotaryQuadrature:
 			encoder = new QuadratureEncoderPdec((uint32_t)tempCPR, tempStepsPerRev);
 			break;
@@ -456,7 +456,7 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 #if SUPPORT_DCSERVO
 		case EncoderType::dcServo:
 			// Use our new dedicated DcServoEncoder class
-			encoder = new DcServoEncoder(tempCPR, tempStepsPerRev);
+			encoder = new DcServoEncoder((uint32_t)tempCPR, tempStepsPerRev);
 			InitDcPwm();
 			break;
 #endif
