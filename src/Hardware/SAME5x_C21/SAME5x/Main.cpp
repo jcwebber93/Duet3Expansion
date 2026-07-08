@@ -27,6 +27,26 @@ unsigned int AppGetXoscNumber() noexcept
 #endif
 }
 
+// Return the CPU frequency in MHz (100 for -MF 100MHz variant, 120 for standard SAME5x)
+unsigned int AppGetCpuFrequency() noexcept
+{
+#if defined(DP3EXB)
+	return 100;
+#else
+	return 120;
+#endif
+}
+
+// Return the XOSC startup delay value for OSCCTRL XOSCCTRL STARTUP field
+unsigned int AppGetXoscStartup() noexcept
+{
+#if defined(DP3EXB)
+	return 0xA;			// ~31ms startup for marginal DP3EXB crystal
+#else
+	return 0;
+#endif
+}
+
 #endif
 
 // End
