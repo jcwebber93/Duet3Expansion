@@ -1605,30 +1605,30 @@ void ClosedLoop::ApplyDcTorqueIox(float torque) noexcept
 void ClosedLoop::ApplyDcTorqueTmc(float torque) noexcept
 {
 #if SUPPORT_TMC51xx
-	SmartDrivers::SetDcPhaseCurrents(driverNumber, 100, 0);
-    return;  // Skip the rest of the function
-	// Convert the normalized torque [-1.0, 1.0] to a target current
+	// Only write XDIRECT when the TMC has been configured for direct mode.
+	// Guards against XDIRECT writes being silently ignored by the chip when GCONF.direct_mode is not set.
+	if (SmartDrivers::GetDriverMode(driverNumber) != DriverMode::direct)
+	{
+		return;
+	}
+
+	// Normalize torque [-1, 1] → target current in Amps, capped at dcMaxCurrentTmc
 	const float targetCurrent = constrain<float>(torque, -1.0f, 1.0f) * dcMaxCurrentTmc;
 
-	// Get the configured run current for the driver, which is used as the reference for XDIRECT
-	const float fullScaleCurrent = SmartDrivers::GetCurrent(driverNumber) * 0.001f;  // Convert mA to A
+	// XDIRECT ±255 = IHOLD current. In direct mode UpdateCurrent() forces IHOLD == IRUN,
+	// so GetCurrent() (which returns motorCurrent, used to set both) is the correct scale reference.
+	const float fullScaleCurrent = SmartDrivers::GetCurrent(driverNumber) * 0.001f;	// mA → A
 
-	// Calculate the 9-bit signed value for the XDIRECT register.
-	// A value of 255 corresponds to the current set by IHOLD. We assume IHOLD is set to the same as IRUN.
-	const int16_t currentRegisterValue = (fullScaleCurrent > 0.0f)
-											? lrintf((targetCurrent / fullScaleCurrent) * 255.0f)
-											: 0;
+	const int16_t regVal = (fullScaleCurrent > 0.0f)
+		? (int16_t)constrain<int32_t>(lrintf((targetCurrent / fullScaleCurrent) * 255.0f), -255, 255)
+		: (int16_t)0;
 
-	if (dcTmcPhaseSelect == 0)
-	{
-		coilA = currentRegisterValue;
-		coilB = 0;
-	}
-	else
-	{
-		coilA = 0;
-		coilB = currentRegisterValue;
-	}
+	// Update member variables so coil-current telemetry (CL_RECORD_COIL_A/B_CURRENT) reports correctly
+	coilA = (dcTmcPhaseSelect == 0) ? regVal : (int16_t)0;
+	coilB = (dcTmcPhaseSelect == 0) ? (int16_t)0 : regVal;
+
+	// SetDcPhaseCurrents packs coilA/coilB into the XDIRECT register format and routes
+	// through SetXdirect → sets phaseToSet + needToSetCoilCurrents → SPI DMA on next TMC cycle (~80µs)
 	SmartDrivers::SetDcPhaseCurrents(driverNumber, coilA, coilB);
 #endif
 }

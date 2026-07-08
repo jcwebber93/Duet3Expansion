@@ -535,7 +535,6 @@ private:
 	uint32_t phaseToSet;									// phase value to be written to the XDIRECT register, only read/written by the TMC task
 #endif
 
-	uint32_t xdirectReg;
 	LocalDriversBitmap driverBit;							// a bitmap containing just this driver number
 	uint16_t minSgLoadRegister;								// the minimum value of the StallGuard bits we read
 	uint16_t numReads, numWrites;							// how many successful reads and writes we had
@@ -598,8 +597,6 @@ pre(!driversPowered)
 	specialWriteRegisterNumber = 0xFF;
 	motorCurrent = 0.0;
 	standstillCurrentFraction = (uint16_t)min<uint32_t>((DefaultStandstillCurrentPercent * 256)/100, 256);
-	xdirectReg = 0;
-
 	// Set default values for all registers and flag them to be updated
 	UpdateRegister(WriteGConf, DefaultGConfReg);
 #if TMC_TYPE == 5160
@@ -1865,8 +1862,8 @@ void SmartDrivers::SetDcPhaseCurrents(size_t driver, int16_t currentA, int16_t c
 
 inline void TmcDriverState::SetDcPhaseCurrents(int16_t currentA, int16_t currentB) noexcept
 {
-	// Combine the two signed 9-bit current values into the XDIRECT register format
-	xdirectReg = ((uint32_t)(currentB & 0x1FF) << 16) | (uint32_t)(currentA & 0x1FF);
+	const uint32_t xdirectVal = ((uint32_t)(currentB & 0x1FF) << 16) | (uint32_t)(currentA & 0x1FF);
+	SetXdirect(xdirectVal);
 }
 
 // Set microstepping and microstep interpolation
@@ -1926,7 +1923,7 @@ uint16_t SmartDrivers::GetMicrostepPosition(size_t driver) noexcept
 // Returns true if request is scheduled. Will not schedule a request if it is equal to the current value.
 bool SmartDrivers::SetMotorPhases(size_t driver, uint32_t regVal) noexcept
 {
-	return driverStates[driver].SetXdirect(regVal);
+	return (driver < numTmcDrivers) && driverStates[driver].SetXdirect(regVal);
 }
 
 #endif
