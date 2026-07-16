@@ -248,6 +248,9 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 	float tempDcMaxCurrentTmc = dcMaxCurrentTmc;
 	uint8_t tempDcTmcPhaseSelect = dcTmcPhaseSelect;
 #endif
+#if SUPPORT_FOC
+	uint8_t tempPolePairCount = polePairCount;
+#endif
 
 	// Pull changed parameters
 	const bool seenT = parser.GetUintParam('T', tempEncoderType);
@@ -262,11 +265,17 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 	const bool seenW = parser.GetFloatParam('W', tempDcMaxCurrentTmc);
 	const bool seenZ = parser.GetUintParam('Z', tempDcTmcPhaseSelect);
 #endif
+#if SUPPORT_FOC
+	const bool seenL = parser.GetUintParam('L', tempPolePairCount);
+#endif
 
 	// Report back if no parameters to change
 	if (!(seenT || seenC || seenPid || seenE || seenQ || seenS
 #if SUPPORT_DCSERVO
 		|| seenU || seenW || seenZ
+#endif
+#if SUPPORT_FOC
+		|| seenL
 #endif
 	)) {
 		if (encoder == nullptr)
@@ -406,6 +415,12 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 #endif
 		}
 #endif
+#if SUPPORT_FOC
+		if (seenL)
+		{
+			polePairCount = tempPolePairCount;
+		}
+#endif
 	}
 
 
@@ -459,6 +474,58 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 			encoder = new DcServoEncoder((uint32_t)tempCPR, tempStepsPerRev);
 			InitDcPwm();
 			break;
+#endif
+
+#if SUPPORT_FOC
+		case EncoderType::bldc:
+		case EncoderType::hybridStepperFoc:
+			// 3-phase PWM output: BLDC uses full SVPWM; hybrid stepper uses 2-phase cos/sin + synthetic C offset.
+			// Underlying position encoder is quadrature (seenC) or absolute magnetic.
+			{
+				if (seenC)
+				{
+					encoder = new QuadratureEncoderPdec((uint32_t)tempCPR, tempStepsPerRev);
+				}
+				else
+				{
+					encoder = CreateRotaryEncoder(magEncoderType, tempStepsPerRev, *Platform::sharedSpi, EncoderCsPin);
+					CreateCalibrationTask();
+				}
+				DeleteObject(focController);
+				const FocOutputMode focMode = (tempEncoderType == EncoderType::hybridStepperFoc)
+												? FocOutputMode::HybridStepper
+												: FocOutputMode::ThreePhase;
+				focController = new FocController(FocPhaseUPin, FocPhaseVPin, FocPhaseWPin,
+													FocPhaseUFn, FocPhaseVFn, FocPhaseWFn, focMode);
+				focController->Init(FocPwmFrequency);
+				motorType = (EncoderType)tempEncoderType;
+			}
+			break;
+
+# if SUPPORT_FOC_STEPPER
+		case EncoderType::stepperFoc:
+			// 4PWM 2-phase stepper via sign-magnitude H-bridge (e.g. L298N).
+			{
+				if (seenC)
+				{
+					encoder = new QuadratureEncoderPdec((uint32_t)tempCPR, tempStepsPerRev);
+				}
+				else
+				{
+					encoder = CreateRotaryEncoder(magEncoderType, tempStepsPerRev, *Platform::sharedSpi, EncoderCsPin);
+					CreateCalibrationTask();
+				}
+				DeleteObject(focController);
+				focController = new FocController(FocStepperIn1Pin, FocStepperIn2Pin,
+													FocStepperIn3Pin, FocStepperIn4Pin,
+													FocStepperIn1Fn, FocStepperIn2Fn,
+													FocStepperIn3Fn, FocStepperIn4Fn,
+													FocStepperEnaPin, FocStepperEnbPin);
+				focController->Init(FocStepperPwmFrequency);
+				motorType = EncoderType::stepperFoc;
+			}
+			break;
+# endif
 #endif
 		}
 
@@ -907,6 +974,38 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 		}
 		else
 #endif
+#if SUPPORT_FOC
+		if (motorType == EncoderType::bldc
+			|| motorType == EncoderType::stepperFoc
+			|| motorType == EncoderType::hybridStepperFoc)
+		{
+			if (currentMode == ClosedLoopMode::open && focController != nullptr)
+			{
+				// Open-loop electrical angle sweep: advances the field at a fixed rate regardless of encoder.
+				// Useful for validating hardware wiring before closed-loop coupling.
+				// Rate: 4/4096 electrical rev per call @ ~12.5kHz ≈ 14 RPM mechanical for a 50-pole-pair stepper.
+				openLoopAngle = (openLoopAngle + 4u) & 0xFFFu;
+				focController->ApplyTorque(0.15f, (uint16_t)openLoopAngle);
+			}
+			else
+			{
+				// FOC uses pole-pair count (L param) for commutation — basic tuning is not applicable.
+				// Mask NeedsBasicTuning out of the gate so a quadrature encoder doesn't block the loop.
+				const TuningErrors focTuningError = tuningError & ~TuningError::NeedsBasicTuning;
+				if (tuning == 0 && focTuningError == 0 && !stall)
+				{
+					const bool hadMovementBeforeFoc = hasMovementCommand;
+					ControlMotorCurrents(now, timeElapsed);
+					if (samplingMode == RecordingMode::OnNextMove && hasMovementCommand && !hadMovementBeforeFoc)
+					{
+						dataCollectionStartTicks = whenNextSampleDue = now;
+						samplingMode = RecordingMode::Immediate;
+					}
+				}
+			}
+		}
+		else
+#endif
 		{
 			// Calculate and store the current error in full steps
 			const bool hadMovementCommand = hasMovementCommand;
@@ -1140,9 +1239,30 @@ void ClosedLoop::CollectSample() noexcept
 #endif
 		if (filterRequested & CL_RECORD_CURRENT_ERROR) 			{ sampleBuffer.PutF32(currentPositionError * recordMultiplier); }
 		if (filterRequested & CL_RECORD_PID_CONTROL_SIGNAL)  	{ sampleBuffer.PutF16(PIDControlSignal * recordMultiplier); }
-		if (filterRequested & CL_RECORD_PID_P_TERM)  			{ sampleBuffer.PutF16(PIDPTerm * recordMultiplier); }
-		if (filterRequested & CL_RECORD_PID_I_TERM)  			{ sampleBuffer.PutF16(PIDITerm * recordMultiplier); }
-		if (filterRequested & CL_RECORD_PID_D_TERM)  			{ sampleBuffer.PutF16(PIDDTerm * recordMultiplier); }
+		if (filterRequested & CL_RECORD_PID_P_TERM)
+		{
+#if SUPPORT_FOC
+			if (focController != nullptr) { sampleBuffer.PutF16(focController->lastDutyU); }
+			else
+#endif
+			{ sampleBuffer.PutF16(PIDPTerm * recordMultiplier); }
+		}
+		if (filterRequested & CL_RECORD_PID_I_TERM)
+		{
+#if SUPPORT_FOC
+			if (focController != nullptr) { sampleBuffer.PutF16(focController->lastDutyV); }
+			else
+#endif
+			{ sampleBuffer.PutF16(PIDITerm * recordMultiplier); }
+		}
+		if (filterRequested & CL_RECORD_PID_D_TERM)
+		{
+#if SUPPORT_FOC
+			if (focController != nullptr) { sampleBuffer.PutF16(focController->lastDutyW); }
+			else
+#endif
+			{ sampleBuffer.PutF16(PIDDTerm * recordMultiplier); }
+		}
 		if (filterRequested & CL_RECORD_CURRENT_STEP_PHASE)  	{ sampleBuffer.PutU16(encoder->GetCurrentPhasePosition()); }
 		if (filterRequested & CL_RECORD_DESIRED_STEP_PHASE)  	{ sampleBuffer.PutU16(desiredStepPhase); }
 		if (filterRequested & CL_RECORD_PHASE_SHIFT)  			{ sampleBuffer.PutF16(vel_measured * recordMultiplier); }
@@ -1239,6 +1359,67 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 		return fabsf(PIDControlSignal) / 256.0f;
 	}
 #endif
+
+#if SUPPORT_FOC
+	if (motorType == EncoderType::bldc
+		|| motorType == EncoderType::stepperFoc
+		|| motorType == EncoderType::hybridStepperFoc)
+	{
+		const float multiplier = (moveInstance->GetDirectionValueNoCheck(driverNumber)) ? 1.0f : -1.0f;
+
+		const bool hadMovementCommand = hasMovementCommand;
+		hasMovementCommand = moveInstance->GetCurrentMotion(driverNumber, now, mParams);
+		if (hasMovementCommand && !hadMovementCommand)
+		{
+			SetTargetToCurrentPosition();
+			PIDITerm = 0.0f;
+			last_vel_error = 0.0f;
+			last_filtered_D = 0.0f;
+			speedFilter.Reset();
+			moveInstance->GetCurrentMotion(driverNumber, now, mParams);
+		}
+
+		const float targetPhysicalCount = (mParams.position * encoder->GetCountsPerStep()) * multiplier;
+		currentPositionError = (targetPhysicalCount - (float)encoder->GetCurrentCount()) * encoder->GetStepsPerCount() * multiplier;
+		speedFilter.ProcessReading(encoder->GetCurrentCount() * encoder->GetStepsPerCount(), now);
+
+		const float timeDelta = (float)ticksSinceLastCall * (1.0f / (float)StepTimer::StepClockRate);
+
+		// Outer position loop (P-controller → velocity setpoint)
+		PIDJTerm = Kpp * currentPositionError;
+		PIDVTerm = Kv * mParams.speed;
+		PIDATerm = Ka * mParams.acceleration * (float)ticksSinceLastCall;
+		const float vel_target = PIDJTerm + PIDVTerm + PIDATerm;
+
+		// Inner velocity loop (PID)
+		vel_measured = speedFilter.GetDerivative() * multiplier;
+		const float vel_error = vel_target - vel_measured;
+		PIDPTerm = Kp * vel_error;
+		PIDITerm = constrain<float>(PIDITerm + (Ki * timeDelta * 0.5f * (vel_error + last_vel_error)), -PIDIlimit, PIDIlimit);
+		const float rawD = (timeDelta > 0.0f) ? (vel_error - last_vel_error) / timeDelta : last_filtered_D;
+		last_filtered_D += 0.1f * (rawD - last_filtered_D);
+		PIDDTerm = Kd * last_filtered_D;
+
+		PIDControlSignal = PIDPTerm + PIDITerm + PIDDTerm;
+
+		// Compute electrical angle from encoder position and pole pair count
+		const int32_t encoderCount = encoder->GetCurrentCount();
+		const uint32_t countsPerElecRev = (uint32_t)((encoder->GetCountsPerStep() * (float)encoder->GetStepsPerRev()) / (float)polePairCount);
+		uint16_t electricalAngle = 0;
+		if (countsPerElecRev > 0)
+		{
+			electricalAngle = (uint16_t)(((uint32_t)(encoderCount % (int32_t)countsPerElecRev) * 4096u) / countsPerElecRev);
+		}
+
+		// Torque magnitude in [-1, 1]: scale control signal by multiplier and normalise
+		const float torqueMagnitude = constrain<float>((PIDControlSignal * multiplier) / 256.0f, -1.0f, 1.0f);
+		ApplyFocTorque(torqueMagnitude, electricalAngle);
+
+		last_vel_error = vel_error;
+		return fabsf(PIDControlSignal) / 256.0f;
+	}
+#endif
+
 	uint16_t commandedStepPhase;
 	float currentFraction;
 
@@ -1633,6 +1814,16 @@ void ClosedLoop::ApplyDcTorqueTmc(float torque) noexcept
 #endif
 }
 #endif
+#endif
+
+#if SUPPORT_FOC
+void ClosedLoop::ApplyFocTorque(float torqueMagnitude, uint16_t electricalAngle) noexcept
+{
+	if (focController != nullptr)
+	{
+		focController->ApplyTorque(torqueMagnitude, electricalAngle);
+	}
+}
 #endif
 
 // End

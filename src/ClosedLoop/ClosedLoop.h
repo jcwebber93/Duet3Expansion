@@ -21,6 +21,9 @@
 # include "TuningErrors.h"
 # include "SampleBuffer.h"
 # include "Encoders/Encoder.h"
+# if SUPPORT_FOC
+#  include "FocController.h"
+# endif
 
 constexpr float MaxSafeBacklash = 0.22;					// the maximum backlash in full steps that we can use - error if there is more
 constexpr float MaxGoodBacklash = 0.15;					// the maximum backlash in full steps that we are happy with - warn if there is more
@@ -168,6 +171,14 @@ private:
 	uint8_t dcTmcPhaseSelect = 0;								// 0 for phase A, 1 for phase B
 	float dcServoMultiplier = 1.0f;								// +1 or -1 per S0/S1 direction setting; persisted so CollectSample can convert logical→physical space
 
+#if SUPPORT_FOC
+	// BLDC/FOC specific
+	FocController *focController = nullptr;						// Owns the 3-phase PWM output; created when encoder type is set to bldc
+	uint8_t polePairCount = 1;									// Number of electrical pole pairs (M569.1 L parameter)
+	EncoderType motorType = EncoderType::none;					// The configured motor type (T param); separate from encoder->GetType() which reflects the sensor
+	uint32_t openLoopAngle = 0;									// Free-running electrical angle [0, 4095] for open-loop FOC sweep
+#endif
+
 	float 	errorThresholds[2];									// The error thresholds. [0] is pre-stall, [1] is stall
 
 	float torqueModeCommandedCurrentFraction = 0.0;		// when in torque mode, the requested torque
@@ -257,6 +268,10 @@ private:
 	void ApplyDcTorque(float torque) noexcept;
 	void ApplyDcTorqueIox(float torque) noexcept;
 	void ApplyDcTorqueTmc(float torque) noexcept;
+#endif
+
+#if SUPPORT_FOC
+	void ApplyFocTorque(float torqueMagnitude, uint16_t electricalAngle) noexcept;
 #endif
 
 	bool BasicTuning(bool firstIteration) noexcept;

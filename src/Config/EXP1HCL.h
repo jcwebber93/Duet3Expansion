@@ -1,4 +1,4 @@
-/*
+	/*
  * EXP1HCLv1_0.h
  *
  *  Created on: 3 Dec 2021
@@ -42,6 +42,8 @@
 #define SUPPORT_CLOSED_LOOP		1
 #define SUPPORT_BRAKE_PWM		1
 #define SUPPORT_DCSERVO			1
+#define SUPPORT_FOC				1
+#define SUPPORT_FOC_STEPPER		1
 #define SUPPORT_MT6835			1
 
 #define SUPPORT_MT6835					1
@@ -212,6 +214,37 @@ constexpr Pin BrakeOnPin = PortAPin(20);
 // Pins for DC servo PWM control
 constexpr Pin DcServoFwdPin = PortBPin(2);		// io0.out
 constexpr Pin DcServoRevPin = PortAPin(12);		// io1.out
+#endif
+
+#if SUPPORT_FOC
+// Pins for 3-phase FOC PWM output (voltage mode, edge-aligned, independent TCCs are fine).
+// These are mutually exclusive with DC servo and brake use on this board.
+// PB10 = TCC0/WO[4] (brake/out1), PA12 = TCC1/WO[2] (io1.out), PB02 = TCC2/WO[2] (io0.out)
+constexpr Pin FocPhaseUPin = PortBPin(10);		// TCC0/WO[4], mux F
+constexpr Pin FocPhaseVPin = PortAPin(12);		// TCC1/WO[2], mux G
+constexpr Pin FocPhaseWPin = PortBPin(2);		// TCC2/WO[2], mux F
+constexpr GpioPinFunction FocPhaseUFn = GpioPinFunction::F;
+constexpr GpioPinFunction FocPhaseVFn = GpioPinFunction::G;
+constexpr GpioPinFunction FocPhaseWFn = GpioPinFunction::F;
+constexpr PwmFrequency FocPwmFrequency = 20000;	// 20 kHz PWM carrier
+#endif
+
+#if SUPPORT_FOC_STEPPER
+// Pins for 4PWM 2-phase stepper FOC (sign-magnitude H-bridge, e.g. L298N or SimpleFOC 4PWM shield).
+// Coil A: IN1=PA01 (out0/TC2_1), IN2=PB10 (out1/TCC0_WO4)
+// Coil B: IN3=PA12 (io1.out/TCC1_WO2), IN4=PB02 (io0.out/TCC2_WO2)
+// ENA/ENB hardwired high on most L298N boards; pass NoPin.
+constexpr Pin FocStepperIn1Pin = PortAPin(1);		// out0, TC2/WO[1], mux E
+constexpr Pin FocStepperIn2Pin = PortBPin(10);		// out1, TCC0/WO[4], mux F
+constexpr Pin FocStepperIn3Pin = PortAPin(12);		// io1.out, TCC1/WO[2], mux G
+constexpr Pin FocStepperIn4Pin = PortBPin(2);		// io0.out, TCC2/WO[2], mux F
+constexpr GpioPinFunction FocStepperIn1Fn = GpioPinFunction::E;
+constexpr GpioPinFunction FocStepperIn2Fn = GpioPinFunction::F;
+constexpr GpioPinFunction FocStepperIn3Fn = GpioPinFunction::G;
+constexpr GpioPinFunction FocStepperIn4Fn = GpioPinFunction::F;
+constexpr Pin FocStepperEnaPin = NoPin;
+constexpr Pin FocStepperEnbPin = NoPin;
+constexpr PwmFrequency FocStepperPwmFrequency = 20000;
 #endif
 
 constexpr auto sercom2cPad0 = SercomIo::sercom2c + SercomIo::pad0;

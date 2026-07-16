@@ -367,6 +367,7 @@ static void RequestFirmwareBlock(uint32_t fileOffset, uint32_t numBytes, CanMess
 	msg->fileOffset = fileOffset;
 	msg->lengthRequested = numBytes;
 	buf.dataLength = msg->GetActualDataLength();
+	buf.useBrs = false;			// this minimal CAN init never negotiates bit rate switching, so it must not request it
 	CanInterface::Send(&buf);
 }
 
@@ -454,6 +455,7 @@ static FirmwareFlashErrorCode RequestBootloaderBlock(uint32_t fileOffset, uint32
 	msg->fileOffset = fileOffset;
 	msg->lengthRequested = numBytes;
 	buf.dataLength = msg->GetActualDataLength();
+	buf.useBrs = false;			// this minimal CAN init never negotiates bit rate switching, so it must not request it
 	CanInterface::Send(&buf);
 	Platform::OnProcessingCanMessage();								// turn the green LED on
 	return FirmwareFlashErrorCode::ok;

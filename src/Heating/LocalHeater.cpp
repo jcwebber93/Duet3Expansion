@@ -655,7 +655,7 @@ GCodeResult LocalHeater::TuningCommand(const CanMessageHeaterTuningCommand& msg,
 		timeSetHeating = millis();
 		tuningCycleComplete = false;
 		cyclesDone = 0;
-		mode = HeaterMode::tuning1;
+		mode = HeaterMode::tuning1_heating_up;
 	}
 	else
 	{
@@ -691,7 +691,7 @@ void LocalHeater::DoTuningStep() noexcept
 	const uint32_t now = millis();
 	switch (mode)
 	{
-	case HeaterMode::tuning1:		// Heating up
+	case HeaterMode::tuning1_heating_up:		// Heating up
 		if (temperature >= tuningHighTemp)							// if reached target
 		{
 			// Move on to next phase
@@ -699,7 +699,7 @@ void LocalHeater::DoTuningStep() noexcept
 			SetHeater(0.0);
 			peakTemp = afterPeakTemp = temperature;
 			lastOffTime = peakTime = afterPeakTime = now;
-			mode = HeaterMode::tuning2;
+			mode = HeaterMode::tuning2_heater_off;
 		}
 		else
 		{
@@ -707,7 +707,7 @@ void LocalHeater::DoTuningStep() noexcept
 		}
 		return;
 
-	case HeaterMode::tuning2:		// Heater is off, record the peak temperature and time
+	case HeaterMode::tuning2_heater_off:		// Heater is off, record the peak temperature and time
 		if (temperature >= peakTemp)
 		{
 			peakTemp = afterPeakTemp = temperature;
@@ -726,7 +726,7 @@ void LocalHeater::DoTuningStep() noexcept
 			lastOnTime = peakTime = afterPeakTime = now;
 			peakTemp = afterPeakTemp = temperature;
 			lastPwm = tuningPwm;						// turn on heater at specified power
-			mode = HeaterMode::tuning3;
+			mode = HeaterMode::tuning3_heater_on;
 		}
 		else if (afterPeakTime == peakTime && tuningHighTemp - temperature >= tuningPeakTempDrop)
 		{
@@ -735,7 +735,7 @@ void LocalHeater::DoTuningStep() noexcept
 		}
 		return;
 
-	case HeaterMode::tuning3:	// Heater is turned on, record the lowest temperature and time
+	case HeaterMode::tuning3_heater_on:	// Heater is turned on, record the lowest temperature and time
 		if (temperature <= peakTemp)
 		{
 			peakTemp = afterPeakTemp = temperature;
@@ -755,7 +755,7 @@ void LocalHeater::DoTuningStep() noexcept
 			lastOffTime = peakTime = afterPeakTime = now;
 			peakTemp = afterPeakTemp = temperature;
 			lastPwm = 0.0;										// turn heater off
-			mode = HeaterMode::tuning2;
+			mode = HeaterMode::tuning2_heater_off;
 			++cyclesDone;
 			tuningCycleComplete = true;
 		}

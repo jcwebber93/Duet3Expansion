@@ -72,3 +72,6 @@ src/ClosedLoop/ClosedLoop.bad_cascade.cpp
 .vscode/settings.json
 AI_Readme.txt
 Duet3Expansion FeatherM4CAN.launch
+50_2026-07-11_16.58.37.csv
+50_2026-07-11_17.09.11.csv
+foc roadmap.md
