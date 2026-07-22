@@ -11,7 +11,7 @@
 #include <I2C/I2cParameters.h>
 
 #define BOARD_TYPE_NAME		"DP3EXB"
-#define BOOTLOADER_NAME		"SAME5x"
+#define BOOTLOADER_NAME		"DP3EXB"
 
 // General features
 #define HAS_VREF_MONITOR		0
@@ -39,6 +39,8 @@
 #define SUPPORT_MT6835			0
 #define ACTIVE_HIGH_STEP		0
 
+#define SUPPORT_FOC				0
+#define SUPPORT_FOC_STEPPER		0
 #define SUPPORT_MT6835					0
 #define SUPPORT_QUADRATURE_ENCODER		1
 #define SUPPORT_COMPOSITE_ENCODER		0

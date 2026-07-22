@@ -979,28 +979,17 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 			|| motorType == EncoderType::stepperFoc
 			|| motorType == EncoderType::hybridStepperFoc)
 		{
-			if (currentMode == ClosedLoopMode::open && focController != nullptr)
+			// FOC uses pole-pair count (L param) for commutation — basic tuning is not applicable.
+			// Mask NeedsBasicTuning out of the gate so a quadrature encoder doesn't block the loop.
+			const TuningErrors focTuningError = tuningError & ~TuningError::NeedsBasicTuning;
+			if (currentMode != ClosedLoopMode::open && tuning == 0 && focTuningError == 0 && !stall)
 			{
-				// Open-loop electrical angle sweep: advances the field at a fixed rate regardless of encoder.
-				// Useful for validating hardware wiring before closed-loop coupling.
-				// Rate: 4/4096 electrical rev per call @ ~12.5kHz ≈ 14 RPM mechanical for a 50-pole-pair stepper.
-				openLoopAngle = (openLoopAngle + 4u) & 0xFFFu;
-				focController->ApplyTorque(0.15f, (uint16_t)openLoopAngle);
-			}
-			else
-			{
-				// FOC uses pole-pair count (L param) for commutation — basic tuning is not applicable.
-				// Mask NeedsBasicTuning out of the gate so a quadrature encoder doesn't block the loop.
-				const TuningErrors focTuningError = tuningError & ~TuningError::NeedsBasicTuning;
-				if (tuning == 0 && focTuningError == 0 && !stall)
+				const bool hadMovementBeforeFoc = hasMovementCommand;
+				ControlMotorCurrents(now, timeElapsed);
+				if (samplingMode == RecordingMode::OnNextMove && hasMovementCommand && !hadMovementBeforeFoc)
 				{
-					const bool hadMovementBeforeFoc = hasMovementCommand;
-					ControlMotorCurrents(now, timeElapsed);
-					if (samplingMode == RecordingMode::OnNextMove && hasMovementCommand && !hadMovementBeforeFoc)
-					{
-						dataCollectionStartTicks = whenNextSampleDue = now;
-						samplingMode = RecordingMode::Immediate;
-					}
+					dataCollectionStartTicks = whenNextSampleDue = now;
+					samplingMode = RecordingMode::Immediate;
 				}
 			}
 		}
@@ -1408,7 +1397,9 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 		uint16_t electricalAngle = 0;
 		if (countsPerElecRev > 0)
 		{
-			electricalAngle = (uint16_t)(((uint32_t)(encoderCount % (int32_t)countsPerElecRev) * 4096u) / countsPerElecRev);
+			int32_t remainder = encoderCount % (int32_t)countsPerElecRev;
+			if (remainder < 0) { remainder += (int32_t)countsPerElecRev; }
+			electricalAngle = (uint16_t)(((uint32_t)remainder * 4096u) / countsPerElecRev);
 		}
 
 		// Torque magnitude in [-1, 1]: scale control signal by multiplier and normalise

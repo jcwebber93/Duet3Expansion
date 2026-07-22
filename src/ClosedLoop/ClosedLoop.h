@@ -176,7 +176,6 @@ private:
 	FocController *focController = nullptr;						// Owns the 3-phase PWM output; created when encoder type is set to bldc
 	uint8_t polePairCount = 1;									// Number of electrical pole pairs (M569.1 L parameter)
 	EncoderType motorType = EncoderType::none;					// The configured motor type (T param); separate from encoder->GetType() which reflects the sensor
-	uint32_t openLoopAngle = 0;									// Free-running electrical angle [0, 4095] for open-loop FOC sweep
 #endif
 
 	float 	errorThresholds[2];									// The error thresholds. [0] is pre-stall, [1] is stall

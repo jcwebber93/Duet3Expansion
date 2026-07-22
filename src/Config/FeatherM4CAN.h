@@ -31,7 +31,16 @@
 #define SINGLE_DRIVER			1					
 #define SUPPORT_SLOW_DRIVERS	1
 #define DEDICATED_STEP_TIMER	1					
-#define SUPPORT_INPUT_SHAPING	1					
+#define SUPPORT_INPUT_SHAPING	1
+
+#define SUPPORT_CLOSED_LOOP			0
+#define SUPPORT_DCSERVO				0
+#define SUPPORT_BRAKE_PWM			0
+#define SUPPORT_FOC					0
+#define SUPPORT_FOC_STEPPER			0
+#define SUPPORT_MT6835				0
+#define SUPPORT_QUADRATURE_ENCODER	0
+#define SUPPORT_COMPOSITE_ENCODER	0
 
 #define ACTIVE_HIGH_STEP		1
 #define ACTIVE_HIGH_DIR			1
@@ -49,15 +58,15 @@
 constexpr DmaChannel DmacChanTmcTx = 0;
 constexpr DmaChannel DmacChanTmcRx = 1;
 constexpr DmaChannel DmacChanAdc0Rx = 2;
-//constexpr DmaChannel DmacChanLedTx = 3;
 constexpr DmaChannel DmacChanSspiTx = 3;
 constexpr DmaChannel DmacChanSspiRx = 4;
+constexpr DmaChannel DmacChanLedTx = 5;
 
-constexpr unsigned int NumDmaChannelsUsed = 5;			// must be at least the number of channels used, may be larger. Max 12 on the SAME5x.
+constexpr unsigned int NumDmaChannelsUsed = 6;			// must be at least the number of channels used, may be larger. Max 12 on the SAME5x.
 
 constexpr DmaPriority DmacPrioTmcTx = 0;
 constexpr DmaPriority DmacPrioTmcRx = 3;
-//constexpr DmaPriority DmacPrioAdcRx = 2;
+constexpr DmaPriority DmacPrioAdcRx = 2;
 constexpr DmaPriority DmacPrioLed = 1;
 constexpr DmaPriority DmacPrioSspiTx = 0;
 constexpr DmaPriority DmacPrioSspiRx = 3;
@@ -68,7 +77,7 @@ const NvicPriority NvicPriorityUart = 3;				// serial driver makes RTOS calls
 const NvicPriority NvicPriorityI2C  = 3;
 const NvicPriority NvicPriorityPins = 3;				// priority for GPIO pin interrupts
 const NvicPriority NvicPriorityCan = 4;
-const NvicPriority NvicPriorityDmac = 5;				// priority for DMA complete interrupts
+const NvicPriority NvicPriorityDmac = 3;				// priority for DMA complete interrupts
 const NvicPriority NvicPriorityAdc = 5;
 
 constexpr size_t NumDrivers = 1;
@@ -81,11 +90,12 @@ constexpr Pin EnablePins[NumDrivers] = { PortAPin(18) };
 
 #define SUPPORT_THERMISTORS		0
 #define SUPPORT_SPI_SENSORS		0
-#define SUPPORT_DMA_NEOPIXEL    0 
 #define SUPPORT_I2C_SENSORS		0
 #define SUPPORT_LIS3DH			0
 #define SUPPORT_LDC1612			0
 #define SUPPORT_DHT_SENSOR		0
+#define SUPPORT_LED_STRIPS		1
+#define SUPPORT_DMA_NEOPIXEL	0	// SERCOM SPI idle-high bug on SAME51G19A makes DMA path unusable
 
 #define NUM_I2C_CHANNELS		0
 #define NUM_SHARED_SPI			0

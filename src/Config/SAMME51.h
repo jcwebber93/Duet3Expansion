@@ -7,9 +7,12 @@
 #define SRC_CONFIG_SAMME51_H_
 
 #include <Hardware/PinDescription.h>
+#include <SPI/SpiParameters.h>
+#include <I2C/I2cParameters.h>
+#include <UART/UartParameters.h>
 
 #define BOARD_TYPE_NAME		"SAMME51"
-#define BOOTLOADER_NAME		"SAME5x"
+#define BOOTLOADER_NAME		"SAMME51"
 
 // General features
 #define HAS_VREF_MONITOR		0
@@ -33,10 +36,42 @@
 #define SUPPORT_TMC51xx			0
 #define SUPPORT_TMC2660			0
 #define SUPPORT_TMC22xx			0
+#define SUPPORT_TMC2240_SPI		0
+
 #define SUPPORT_MT6835			0
 #define ACTIVE_HIGH_STEP		1
 #define ACTIVE_HIGH_DIR			1
 #define ACTIVE_HIGH_ENABLE		0	// active-low (standard for DRV8825, TMC standalone, etc.)
+#define SUPPORT_FOC				0
+#define SUPPORT_FOC_STEPPER		0
+#define SUPPORT_MT6835					0
+#define SUPPORT_QUADRATURE_ENCODER		1
+#define SUPPORT_COMPOSITE_ENCODER		0
+
+// DMA channel assignments
+constexpr DmaChannel DmacChanTmcTx = 0;
+constexpr DmaChannel DmacChanTmcRx = 1;
+constexpr DmaChannel DmacChanAdc0Rx = 2;
+constexpr DmaChannel DmacChanLedTx = 5;
+constexpr DmaChannel DmacChanSspiTx = 3;
+constexpr DmaChannel DmacChanSspiRx = 4;
+constexpr unsigned int NumDmaChannelsUsed = 6;
+
+constexpr DmaPriority DmacPrioTmcTx = 0;
+constexpr DmaPriority DmacPrioTmcRx = 3;
+constexpr DmaPriority DmacPrioAdcRx = 2;
+constexpr DmaPriority DmacPrioLed = 1;
+constexpr DmaPriority DmacPrioSspiTx = 0;
+constexpr DmaPriority DmacPrioSspiRx = 3;
+
+// Interrupt priorities, lower means higher priority. 0-2 can't make RTOS calls.
+const NvicPriority NvicPriorityStep = 3;
+const NvicPriority NvicPriorityDmac = 3;
+const NvicPriority NvicPriorityUart = 3;
+const NvicPriority NvicPriorityI2C  = 3;
+const NvicPriority NvicPriorityPins = 3;
+const NvicPriority NvicPriorityCan  = 4;
+const NvicPriority NvicPriorityAdc  = 5;
 
 constexpr size_t NumDrivers = 1;
 
@@ -51,15 +86,18 @@ constexpr Pin EnablePins[NumDrivers]    = { PortAPin(11) };
 #define SUPPORT_LIS3DH			0
 #define SUPPORT_DHT_SENSOR		0
 #define SUPPORT_LED_STRIPS		1
-#define SUPPORT_DMA_NEOPIXEL	1
+#define SUPPORT_DMA_NEOPIXEL	0	// SERCOM SPI idle-high bug on SAME51G19A makes DMA path unusable
 #define USE_SERIAL_DEBUG		1
 #define NUM_SERIAL_PORTS		1
+#define NUM_I2C_CHANNELS		0
+#define NUM_SHARED_SPI			1
+#define NUM_ASYNC_PORTS			1
 
 #define USE_MPU					0
 #define USE_CACHE				1
 
-// CAN0 on standard pins PA22/PA23
-constexpr bool UseAlternateCanPins = false;
+constexpr unsigned int CANInstanceNumber = 0;
+constexpr bool UseLaterCanPins = false;
 
 constexpr size_t MaxPortsPerHeater = 1;
 
@@ -87,7 +125,21 @@ constexpr GpioPinFunction SSPISclkPinPeriphMode = GpioPinFunction::C;
 constexpr Pin SSPIMisoPin = PortAPin(19);
 constexpr GpioPinFunction SSPIMisoPinPeriphMode = GpioPinFunction::C;
 #endif
-
+// Shared SPI definitions
+constexpr SpiParameters SharedSpiParams =
+{
+	.sercomNumber = 1,
+	.mosiPin = PortAPin(16),
+	.misoPin = PortAPin(19),
+	.sclkPin = PortAPin(17),
+	.pinFunction = GpioPinFunction::C,
+	.dataInPad = 3,
+	.dataOutPad = 0,
+	.dmaChanTx = DmacChanSspiTx,
+	.dmaChanRx = DmacChanSspiRx,
+	.dmaPrioTx = DmacPrioSspiTx,
+	.dmaPrioRx = DmacPrioSspiRx,
+};
 // Encoder CS pin (used to deselect SPI encoders at startup, even when using PDEC)
 constexpr Pin EncoderCsPin = PortAPin(18);
 
@@ -154,7 +206,7 @@ constexpr PinDescription PinTable[] =
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa21"			},	// PA21
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA22 CAN0 TX
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA23 CAN0 RX
-	{ TcOutput::none,	TccOutput::tcc2_2f,	AdcInput::none,		SercomIo::none,		SercomIo::none,		8,		"pa24"			},	// PA24 PDEC QDI0 (encoder A)
+	{ TcOutput::none,	TccOutput::tcc2_2F,	AdcInput::none,		SercomIo::none,		SercomIo::none,		8,		"pa24"			},	// PA24 PDEC QDI0 (encoder A)
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		9,		"pa25"			},	// PA25 PDEC QDI1 (encoder B)
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA26 not on chip
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa27"			},	// PA27
@@ -200,28 +252,19 @@ constexpr IRQn StepTcIRQn = TC0_IRQn;
 constexpr unsigned int StepTcNumber = 0;
 #define STEP_TC_HANDLER		TC0_Handler
 
-// UART on SERCOM0 (PA04 = TX, PA05 = RX)
+// UART on SERCOM0 (PA04 = TX pad 0, PA05 = RX pad 1, Mux D)
 constexpr IRQn Serial0_IRQn = SERCOM0_0_IRQn;
 
-// DMA channel assignments
-constexpr DmaChannel DmacChanTmcTx = 0;
-constexpr DmaChannel DmacChanTmcRx = 1;
-constexpr DmaChannel DmacChanAdc0Rx = 2;
-constexpr DmaChannel DmacChanLedTx = 3;
-constexpr unsigned int NumDmaChannelsUsed = 4;
-
-constexpr DmaPriority DmacPrioTmcTx = 0;
-constexpr DmaPriority DmacPrioTmcRx = 3;
-constexpr DmaPriority DmacPrioAdcRx = 2;
-constexpr DmaPriority DmacPrioLed = 1;
-
-// Interrupt priorities, lower means higher priority. 0-2 can't make RTOS calls.
-const NvicPriority NvicPriorityStep = 3;
-const NvicPriority NvicPriorityDmac = 3;
-const NvicPriority NvicPriorityUart = 3;
-const NvicPriority NvicPriorityI2C  = 3;
-const NvicPriority NvicPriorityPins = 3;
-const NvicPriority NvicPriorityCan  = 4;
-const NvicPriority NvicPriorityAdc  = 5;
+constexpr UartParameters Serial0Params =
+{
+	.sercomNumber = 0,
+	.rxPin = PortAPin(5),
+	.txPin = PortAPin(4),
+	.pinFunction = GpioPinFunction::D,
+	.dataInPad = 1,
+	.dataOutPad = 0,
+	.numRxSlots = 32,
+	.numTxSlots = 512
+};
 
 #endif /* SRC_CONFIG_SAMME51_H_ */
