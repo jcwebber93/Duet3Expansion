@@ -11,7 +11,7 @@
 #include <I2C/I2cParameters.h>
 
 #define BOARD_TYPE_NAME		"DP3EXB"
-#define BOOTLOADER_NAME		"SAME5x"
+#define BOOTLOADER_NAME		"DP3EXB"
 
 // General features
 #define HAS_VREF_MONITOR		0
@@ -23,8 +23,8 @@
 
 // Drivers
 #define SUPPORT_DRIVERS			1
-#define HAS_SMART_DRIVERS		0
-#define HAS_STALL_DETECT		0
+#define HAS_SMART_DRIVERS		1
+#define HAS_STALL_DETECT		1
 #define SINGLE_DRIVER			1
 #define SUPPORT_SLOW_DRIVERS	1
 #define DEDICATED_STEP_TIMER	1
@@ -32,13 +32,15 @@
 #define SUPPORT_CLOSED_LOOP		1
 #define SUPPORT_DCSERVO			1
 #define SUPPORT_BRAKE_PWM		0
-#define SUPPORT_TMC51xx			0
+#define SUPPORT_TMC51xx			1
 #define SUPPORT_TMC2660			0
 #define SUPPORT_TMC22xx			0
 #define SUPPORT_TMC2240_SPI		0
 #define SUPPORT_MT6835			0
 #define ACTIVE_HIGH_STEP		0
 
+#define SUPPORT_FOC				0
+#define SUPPORT_FOC_STEPPER		0
 #define SUPPORT_MT6835					0
 #define SUPPORT_QUADRATURE_ENCODER		1
 #define SUPPORT_COMPOSITE_ENCODER		0
@@ -69,11 +71,41 @@ const NvicPriority NvicPriorityCan  = 4;
 const NvicPriority NvicPriorityAdc  = 5;
 
 constexpr size_t NumDrivers = 1;
+constexpr size_t MaxSmartDrivers = 1;
+constexpr float MaxMotorCurrent = 1000.0;
+constexpr uint32_t DefaultStandstillCurrentPercent = 71;
+constexpr float Tmc5160SenseResistor = 0.050;
+
+// Stub TMC SPI/driver definitions — no physical TMC chip is present.
+// SERCOM0 and the named pins are unused on DP3EXB. The SPI fires into open air;
+// the TMC task provides the 80us cadence that drives PhaseStepControlLoop() for DC servo.
+constexpr Pin GlobalTmcEnablePin = PortAPin(2);		// disconnected
+constexpr Pin GlobalTmcCSPin     = PortAPin(3);		// disconnected
+
+#define TMC_USES_SERCOM	1
+Sercom * const SERCOM_TMC = SERCOM0;
+constexpr uint8_t TmcSercomNumber = 0;
+
+constexpr Pin TMCMosiPin = PortAPin(8);
+constexpr Pin TMCSclkPin = PortAPin(10);
+constexpr Pin TMCMisoPin = PortAPin(11);
+constexpr GpioPinFunction TMCSpiPinsPeriphMode = GpioPinFunction::C;
+
+// TMC clock output — GCLK5 routed to PB11 (unused GPIO on DP3EXB, same as EXP1HCL)
+constexpr uint8_t TmcClockGclkNumber = 5;
+constexpr Pin TmcClockPin = PortBPin(11);
+constexpr GpioPinFunction TmcClockPinPeriphMode = GpioPinFunction::M;
+
+// Step and direction pins — HAS_SMART_DRIVERS=1 requires these even though the DC servo
+// path never uses step pulses (allDriverBits=0 when SUPPORT_DCSERVO && HAS_SMART_DRIVERS).
+// Point at disconnected pins.
+constexpr Pin StepPins[NumDrivers]      = { PortAPin(2) };		// disconnected
+constexpr Pin DirectionPins[NumDrivers] = { PortAPin(3) };		// disconnected
+PortGroup * const StepPio = &(PORT->Group[0]);
+
+#define ACTIVE_HIGH_DIR		1
 
 // No physical stepper driver is fitted — SUPPORT_DRIVERS 1 is required for DC servo (Move class).
-// StepPio must be defined because Move.h's StepDriversLow/High reference it at compile time,
-// but driversNormallyUsed is 0 so no port writes ever occur.
-PortGroup * const StepPio = &(PORT->Group[0]);
 
 #define SUPPORT_THERMISTORS		1
 #define SUPPORT_SPI_SENSORS		0
@@ -142,8 +174,10 @@ constexpr GpioPinFunction PositionDecoderPinFunction = GpioPinFunction::G;
 // DC servo PWM — two independent TCCs for independent frequency control
 // PA13 -> TCC1_WO3 (Mux G, tcc1_3G): servo forward / H-bridge IN A
 // PA20 -> TCC0_WO0 (Mux G, tcc0_0G): servo reverse / H-bridge IN B
-constexpr Pin DcServoFwdPin = PortAPin(13);		// io_fwd
-constexpr Pin DcServoRevPin = PortAPin(20);		// io_rev
+//constexpr Pin DcServoFwdPin = PortAPin(13);		// io_fwd
+//constexpr Pin DcServoRevPin = PortAPin(20);		// io_rev
+constexpr Pin DcServoFwdPin = PortAPin(20);		// io_fwd
+constexpr Pin DcServoRevPin = PortAPin(13);		// io_rev
 #endif
 
 // Table of pin functions that we are allowed to use
