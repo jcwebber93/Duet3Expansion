@@ -75,7 +75,7 @@ public:
 	bool GetCurrentMotion(uint32_t when, MotionParameters& mParams) noexcept;
 
 #if SUPPORT_DCSERVO
-	bool IsDcServo() const noexcept { return closedLoopControl.GetEncoderType() == EncoderType::dcServo; }
+	bool IsDcServo() const noexcept { return closedLoopControl.IsDcServoMode(); }
 #else
 	bool IsDcServo() const noexcept { return false; }
 #endif

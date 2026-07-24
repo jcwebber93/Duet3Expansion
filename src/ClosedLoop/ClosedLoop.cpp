@@ -39,9 +39,6 @@ using std::numeric_limits;
 # include "Encoders/AbsoluteRotaryEncoder.h"
 # include "Encoders/QuadratureEncoderPdec.h"
 # include "Encoders/LinearCompositeEncoder.h"
-#if SUPPORT_DCSERVO
-# include "Encoders/DcServoEncoder.h"
-#endif
 
 # include <ClosedLoop/DerivativeAveragingFilter.h>
 
@@ -281,7 +278,7 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 						(double)Kp, (double)Ki, (double)Kd, (double)Kv, (double)Ka, (double)torquePerAmp, (double)Kpp);
 			reply.lcatf("Warning/error threshold %.2f/%.2f", (double)errorThresholds[0], (double)errorThresholds[1]);
 #if SUPPORT_DCSERVO
-			if (encoder->GetType() == EncoderType::dcServo)
+			if (isDcServoMode)
 			{
 				reply.lcatf(", DC output: %s", (dcOutputMode == DcServoOutputMode::IoxPwm) ? "IOX" :
 													(dcTmcPhaseSelect == 0) ? "TMC (phase A)" : "TMC (phase B)");
@@ -406,6 +403,10 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 #endif
 		}
 #endif
+		if (seenT)
+		{
+			isDcServoMode = (tempEncoderType == EncoderType::dcServo);
+		}
 	}
 
 
@@ -455,8 +456,7 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 
 #if SUPPORT_DCSERVO
 		case EncoderType::dcServo:
-			// Use our new dedicated DcServoEncoder class
-			encoder = new DcServoEncoder((uint32_t)tempCPR, tempStepsPerRev);
+			encoder = new QuadratureEncoderPdec((uint32_t)tempCPR, tempStepsPerRev);
 			InitDcPwm();
 			break;
 #endif
@@ -467,7 +467,7 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 			const GCodeResult rslt = encoder->Init(reply);
 			if (rslt <= GCodeResult::warning)
 			{
-				tuningError = encoder->MinimalTuningNeeded();
+				tuningError = isDcServoMode ? 0 : encoder->MinimalTuningNeeded();
 				encoder->LoadLUT(tuningError);
 			}
 			else
@@ -897,7 +897,7 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 	if (encoder->TakeReading())
 	{
 #if SUPPORT_DCSERVO
-		if (encoder->GetType() == EncoderType::dcServo)
+		if (isDcServoMode)
 		{
 			// For DC servo, we handle motion parameter fetching and control inside ControlMotorCurrents
 			if (currentMode != ClosedLoopMode::open && tuning == 0 && tuningError == 0 && !stall)
@@ -974,7 +974,7 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 					{
 						stall = false;
 #if SUPPORT_DCSERVO
-						if (encoder->GetType() == EncoderType::dcServo)
+						if (isDcServoMode)
 						{
 							PIDITerm = 0.0f;
 							last_vel_error = 0.0f;
@@ -991,7 +991,7 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 					{
 						// A stall has just been detected. Stop the motor immediately.
 #if SUPPORT_DCSERVO
-						if (encoder->GetType() == EncoderType::dcServo)
+						if (isDcServoMode)
 						{
 							// Prevent PID windup and spikes by clearing accumulators
 							PIDITerm = 0.0f;
@@ -1121,7 +1121,7 @@ void ClosedLoop::CollectSample() noexcept
 #if SUPPORT_DCSERVO
 			// For DC servo use the raw physical position from DriveMovement, which is unaffected by the S0/S1
 			// direction setting and is directly comparable to CL_RECORD_CURRENT_MOTOR_STEPS.
-			if (encoder->GetType() == EncoderType::dcServo)
+			if (isDcServoMode)
 			{
 				sampleBuffer.PutF32(moveInstance->GetTargetMotorStepsPhysical(driverNumber));
 			}
@@ -1134,7 +1134,7 @@ void ClosedLoop::CollectSample() noexcept
 		// For DC servo, logical-space values are sign-flipped when S0 direction is active. Apply dcServoMultiplier to
 		// convert them back to physical space so all chart traces are consistent with measured/target position.
 #if SUPPORT_DCSERVO
-		const float recordMultiplier = (encoder->GetType() == EncoderType::dcServo) ? dcServoMultiplier : 1.0f;
+		const float recordMultiplier = (isDcServoMode) ? dcServoMultiplier : 1.0f;
 #else
 		constexpr float recordMultiplier = 1.0f;
 #endif
@@ -1154,7 +1154,7 @@ void ClosedLoop::CollectSample() noexcept
 		if (filterRequested & CL_RECORD_MEASURED_VELOCITY)
 		{
 #if SUPPORT_DCSERVO
-			if (encoder->GetType() == EncoderType::dcServo)
+			if (isDcServoMode)
 			{
 				// For DC Servos, convert velocity to mm/sec for charting to make it human-readable.
 				// The internal PID loop continues to use counts/tick.
@@ -1183,7 +1183,7 @@ void ClosedLoop::CollectSample() noexcept
 inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::Ticks ticksSinceLastCall) noexcept
 {
 #if SUPPORT_DCSERVO
-	if (encoder->GetType() == EncoderType::dcServo)
+	if (isDcServoMode)
 	{
 		const float multiplier = (moveInstance->GetDirectionValueNoCheck(driverNumber)) ? 1.0f : -1.0f;
 		dcServoMultiplier = multiplier;									// persist for CollectSample to convert logical→physical space

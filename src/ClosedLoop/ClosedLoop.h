@@ -86,6 +86,8 @@ public:
 		return (encoder == nullptr) ? EncoderType::none : encoder->GetType();
 	}
 
+	bool IsDcServoMode() const noexcept { return isDcServoMode; }
+
 	void InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks timeElapsed) noexcept;
 	StandardDriverStatus ReadLiveStatus() const noexcept;
 	bool IsClosedLoopEnabled() const noexcept;
@@ -167,6 +169,7 @@ private:
 	float dcMaxCurrentTmc = 1.0;								// Max current in Amps for TMC DC servo output mode
 	uint8_t dcTmcPhaseSelect = 0;								// 0 for phase A, 1 for phase B
 	float dcServoMultiplier = 1.0f;								// +1 or -1 per S0/S1 direction setting; persisted so CollectSample can convert logical→physical space
+	bool isDcServoMode = false;									// true when controlling a DC servo regardless of encoder type
 
 	float 	errorThresholds[2];									// The error thresholds. [0] is pre-stall, [1] is stall
 
