@@ -78,7 +78,6 @@ constexpr uint32_t ClosedLoopSleepClocks = (StepTimer::StepClockRate * 80) / 100
 static Task<200> closedLoopTask;
 static StepTimer closedLoopTimer;
 static uint32_t clLastWakeupTime;
-static volatile bool closedLoopEnabled = false;
 
 static void ClosedLoopTimerCallback(CallbackParameter) noexcept
 {
@@ -88,25 +87,22 @@ static void ClosedLoopTimerCallback(CallbackParameter) noexcept
 extern "C" [[noreturn]] void ClosedLoopTaskLoop(void*) noexcept
 {
 	closedLoopTimer.SetCallback(ClosedLoopTimerCallback, (CallbackParameter)0);
+	clLastWakeupTime = StepTimer::GetTimerTicks();
 	for (;;)
 	{
-		if (!closedLoopEnabled)
-		{
-			TaskBase::TakeIndexed(NotifyIndices::Tmc);		// block until Move::Spin() signals ready
-			clLastWakeupTime = StepTimer::GetTimerTicks();
-		}
-		else
-		{
-			moveInstance->PhaseStepControlLoop();
+		moveInstance->PhaseStepControlLoop();
 
-			clLastWakeupTime += ClosedLoopSleepClocks;
+		clLastWakeupTime += ClosedLoopSleepClocks;
+		bool needToWait;
+		{
 			AtomicCriticalSectionLocker lock;
-			if (!closedLoopTimer.ScheduleCallback(clLastWakeupTime))
-			{
-				TaskBase::TakeIndexed(NotifyIndices::Tmc);	// wait for timer; ScheduleCallback returns false when scheduled
-			}
-			// ScheduleCallback returns true = time already past, loop immediately without waiting
+			needToWait = !closedLoopTimer.ScheduleCallback(clLastWakeupTime);
+		}	// release critical section before blocking so the timer ISR can fire
+		if (needToWait)
+		{
+			TaskBase::TakeIndexed(NotifyIndices::Tmc);
 		}
+		// ScheduleCallback returns true = time already past, loop immediately without waiting
 	}
 }
 
@@ -437,12 +433,6 @@ void Move::Spin() noexcept
 	if (nextDriveToPoll == MaxSmartDrivers)
 	{
 		nextDriveToPoll = 0;
-	}
-#elif SUPPORT_CLOSED_LOOP
-	if (!closedLoopEnabled)
-	{
-		closedLoopEnabled = true;
-		closedLoopTask.Give(NotifyIndices::Tmc);
 	}
 #endif
 }
@@ -1684,6 +1674,28 @@ GCodeResult Move::ProcessM569(const CanMessageGeneric& msg, const StringRef& rep
 	}
 #endif
 
+#if SUPPORT_CLOSED_LOOP && !HAS_SMART_DRIVERS
+	{
+		uint32_t val;
+		if (parser.GetUintParam('D', val))	// set driver mode (closed loop boards without smart drivers)
+		{
+			seen = true;
+			// D4 = closed loop, D5 = assisted open — values matching DriverMode::direct and direct+1
+			// DriverMode enum is only defined when SUPPORT_TMC51xx, so use numeric literals here.
+			const ClosedLoopMode mode = (val == 4u) ? ClosedLoopMode::closed
+										: (val == 5u) ? ClosedLoopMode::assistedOpen
+											: ClosedLoopMode::open;
+			if (!dms[drive].closedLoopControl.SetClosedLoopEnabled(mode, reply))
+			{
+				return GCodeResult::error;
+			}
+			if (mode != ClosedLoopMode::open)
+			{
+				dms[drive].closedLoopControl.DriverSwitchedToClosedLoop();
+			}
+		}
+	}
+#endif
 #if HAS_SMART_DRIVERS
 	{
 		uint32_t val;
@@ -2427,6 +2439,13 @@ bool Move::EnableIfIdle(size_t driver) noexcept
 void Move::ResetPhaseStepControlLoopCallTime() noexcept
 {
 	prevPSControlLoopCallTime = StepTimer::GetTimerTicks();
+}
+
+unsigned int Move::CountSegments(size_t driver) const noexcept
+{
+	unsigned int n = 0;
+	for (const MoveSegment* seg = dms[driver].segments; seg != nullptr; seg = seg->GetNext()) { ++n; }
+	return n;
 }
 
 // Helper function to reset the 'monitoring variables' as defined above

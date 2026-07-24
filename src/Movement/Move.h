@@ -176,6 +176,12 @@ public:
 	void ClosedLoopDiagnostics(size_t driver, const StringRef& reply) noexcept;
 	void ResetPhaseStepMonitoringVariables() noexcept;
 	void ResetPhaseStepControlLoopCallTime() noexcept;
+
+	// Accessors for DC servo diagnostics
+	unsigned int GetDMState(size_t driver) const noexcept { return (unsigned int)dms[driver].state; }
+	unsigned int CountSegments(size_t driver) const noexcept;
+	int32_t GetCurrentMotorPosition(size_t driver) const noexcept { return dms[driver].currentMotorPosition; }
+	float GetDistanceCarriedForwards(size_t driver) const noexcept { return (float)dms[driver].distanceCarriedForwards; }
 #endif
 
 private:
@@ -443,6 +449,7 @@ inline __attribute__((always_inline)) bool Move::ScheduleNextStepInterrupt() noe
 
 inline void Move::StepDriversLow() noexcept
 {
+#if !SUPPORT_DCSERVO || HAS_SMART_DRIVERS
 # if DIFFERENTIAL_STEPPER_OUTPUTS || ACTIVE_HIGH_STEP
 #  if STM32
 	StepPort->BRR = allDriverBits;
@@ -454,10 +461,12 @@ inline void Move::StepDriversLow() noexcept
 # else
 	StepPio->OUTSET.reg = allDriverBits;
 # endif
+#endif
 }
 
 inline void Move::StepDriversHigh(uint32_t driverMap) noexcept
 {
+#if !SUPPORT_DCSERVO || HAS_SMART_DRIVERS
 # if DIFFERENTIAL_STEPPER_OUTPUTS || ACTIVE_HIGH_STEP
 #  if STM32
 	StepPort->BSRR = allDriverBits;
@@ -469,6 +478,7 @@ inline void Move::StepDriversHigh(uint32_t driverMap) noexcept
 # else
 	StepPio->OUTCLR.reg = driverMap;
 # endif
+#endif
 }
 
 #if SINGLE_DRIVER

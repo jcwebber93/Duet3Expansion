@@ -966,10 +966,38 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 #if SUPPORT_DCSERVO
 		if (isDcServoMode)
 		{
+			// For DC servo, basic tuning is not applicable (no stepper pole-pair phase to calibrate).
+			// Mask NeedsBasicTuning so the quadrature encoder's initial tuning error doesn't block the loop.
+			const TuningErrors dcServoTuningError = tuningError & ~TuningError::NeedsBasicTuning;
 			// For DC servo, we handle motion parameter fetching and control inside ControlMotorCurrents
-			if (currentMode != ClosedLoopMode::open && tuning == 0 && tuningError == 0 && !stall)
+			if (currentMode != ClosedLoopMode::open && tuning == 0 && dcServoTuningError == 0 && !stall)
 			{
+				const bool hadMovementCommand = hasMovementCommand;
 				ControlMotorCurrents(now, timeElapsed);
+				if (samplingMode == RecordingMode::OnNextMove && hasMovementCommand && !hadMovementCommand)
+				{
+					dataCollectionStartTicks = whenNextSampleDue = now;
+					samplingMode = RecordingMode::Immediate;
+				}
+			}
+
+			// Collect a sample, if we need to
+			if (samplingMode == RecordingMode::Immediate && (int32_t)(now - whenNextSampleDue) >= 0)
+			{
+				CollectSample();
+				whenNextSampleDue += dataCollectionIntervalTicks;
+			}
+
+			// Update the statistics
+			{
+				TaskCriticalSectionLocker lock;
+				const float absPositionError = fabsf(currentPositionError);
+				if (absPositionError > periodMaxAbsPositionError) { periodMaxAbsPositionError = absPositionError; }
+				periodSumOfPositionErrorSquares += fsquare(currentPositionError);
+				const float currentFraction = fabsf(PIDControlSignal) / 256.0f;
+				if (currentFraction > periodMaxCurrentFraction) { periodMaxCurrentFraction = currentFraction; }
+				periodSumOfCurrentFractions += currentFraction;
+				++periodNumSamples;
 			}
 		}
 		else
@@ -1613,6 +1641,19 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 		{
 			reply.catf(" (filter: %#lx, mode: %u, rate: %u, movement: %u)", filterRequested, samplingMode, (unsigned int)(StepTimer::StepClockRate/dataCollectionIntervalTicks), movementRequested);
 		}
+#if SUPPORT_DCSERVO
+		if (isDcServoMode)
+		{
+			reply.lcatf("DC PID snapshot: pos=%.1f enc=%" PRIi32 " err=%.2f P=%.1f I=%.1f D=%.1f out=%.1f mult=%.0f cmd=%d",
+				(double)mParams.position, (encoder != nullptr) ? encoder->GetCurrentCount() : 0,
+				(double)currentPositionError,
+				(double)PIDPTerm, (double)PIDITerm, (double)PIDDTerm, (double)PIDControlSignal,
+				(double)dcServoMultiplier, (int)hasMovementCommand);
+			reply.lcatf("DM state=%u segs=%u curPos=%" PRIi32 " dcf=%.1f",
+				moveInstance->GetDMState(driverNumber), moveInstance->CountSegments(driverNumber),
+				moveInstance->GetCurrentMotorPosition(driverNumber), (double)moveInstance->GetDistanceCarriedForwards(driverNumber));
+		}
+#endif
 	}
 
 	//DEBUG

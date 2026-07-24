@@ -23,8 +23,8 @@
 
 // Drivers
 #define SUPPORT_DRIVERS			1
-#define HAS_SMART_DRIVERS		1
-#define HAS_STALL_DETECT		1
+#define HAS_SMART_DRIVERS		0
+#define HAS_STALL_DETECT		0
 #define SINGLE_DRIVER			1
 #define SUPPORT_SLOW_DRIVERS	1
 #define DEDICATED_STEP_TIMER	1
@@ -32,7 +32,7 @@
 #define SUPPORT_CLOSED_LOOP		1
 #define SUPPORT_DCSERVO			1
 #define SUPPORT_BRAKE_PWM		0
-#define SUPPORT_TMC51xx			1
+#define SUPPORT_TMC51xx			0
 #define SUPPORT_TMC2660			0
 #define SUPPORT_TMC22xx			0
 #define SUPPORT_TMC2240_SPI		0
@@ -46,17 +46,12 @@
 #define SUPPORT_COMPOSITE_ENCODER		0
 
 // DMA channel assignments
-constexpr DmaChannel DmacChanTmcTx = 0;
-constexpr DmaChannel DmacChanTmcRx = 1;
-constexpr DmaChannel DmacChanAdc0Rx = 2;
-constexpr DmaChannel DmacChanSspiTx = 3;
-constexpr DmaChannel DmacChanSspiRx = 4;
+constexpr DmaChannel DmacChanAdc0Rx = 0;
+constexpr DmaChannel DmacChanSspiTx = 1;
+constexpr DmaChannel DmacChanSspiRx = 2;
 
-constexpr unsigned int NumDmaChannelsUsed = 5;
+constexpr unsigned int NumDmaChannelsUsed = 3;
 
-constexpr DmaPriority DmacPrioTmcTx = 0;
-constexpr DmaPriority DmacPrioTmcRx = 3;
-//constexpr DmaPriority DmacPrioAdcRx = 2;
 constexpr DmaPriority DmacPrioLed = 1;
 constexpr DmaPriority DmacPrioSspiTx = 0;
 constexpr DmaPriority DmacPrioSspiRx = 3;
@@ -71,37 +66,7 @@ const NvicPriority NvicPriorityCan  = 4;
 const NvicPriority NvicPriorityAdc  = 5;
 
 constexpr size_t NumDrivers = 1;
-constexpr size_t MaxSmartDrivers = 1;
 constexpr float MaxMotorCurrent = 1000.0;
-constexpr uint32_t DefaultStandstillCurrentPercent = 71;
-constexpr float Tmc5160SenseResistor = 0.050;
-
-// Stub TMC SPI/driver definitions — no physical TMC chip is present.
-// SERCOM0 and the named pins are unused on DP3EXB. The SPI fires into open air;
-// the TMC task provides the 80us cadence that drives PhaseStepControlLoop() for DC servo.
-constexpr Pin GlobalTmcEnablePin = PortAPin(2);		// disconnected
-constexpr Pin GlobalTmcCSPin     = PortAPin(3);		// disconnected
-
-#define TMC_USES_SERCOM	1
-Sercom * const SERCOM_TMC = SERCOM0;
-constexpr uint8_t TmcSercomNumber = 0;
-
-constexpr Pin TMCMosiPin = PortAPin(8);
-constexpr Pin TMCSclkPin = PortAPin(10);
-constexpr Pin TMCMisoPin = PortAPin(11);
-constexpr GpioPinFunction TMCSpiPinsPeriphMode = GpioPinFunction::C;
-
-// TMC clock output — GCLK5 routed to PB11 (unused GPIO on DP3EXB, same as EXP1HCL)
-constexpr uint8_t TmcClockGclkNumber = 5;
-constexpr Pin TmcClockPin = PortBPin(11);
-constexpr GpioPinFunction TmcClockPinPeriphMode = GpioPinFunction::M;
-
-// Step and direction pins — HAS_SMART_DRIVERS=1 requires these even though the DC servo
-// path never uses step pulses (allDriverBits=0 when SUPPORT_DCSERVO && HAS_SMART_DRIVERS).
-// Point at disconnected pins.
-constexpr Pin StepPins[NumDrivers]      = { PortAPin(2) };		// disconnected
-constexpr Pin DirectionPins[NumDrivers] = { PortAPin(3) };		// disconnected
-PortGroup * const StepPio = &(PORT->Group[0]);
 
 #define ACTIVE_HIGH_DIR		1
 
