@@ -98,7 +98,7 @@ bool ClosedLoop::BasicTuning(bool firstIteration) noexcept
 #if SUPPORT_DCSERVO
 
 	// Explicitly bypass for DC servo type for clarity and safety
-	if (encoder->GetType() == EncoderType::dcServo)
+	if (isDcServoMode)
 	{
 		return true;
 	}
@@ -238,7 +238,7 @@ bool ClosedLoop::EncoderCalibration(bool firstIteration) noexcept
 	}
 #if SUPPORT_DCSERVO
 	// Explicitly bypass for DC servo type for clarity and safety
-	if (encoder->GetType() == EncoderType::dcServo)
+	if (isDcServoMode)
 	{
 		return true;
 	}
