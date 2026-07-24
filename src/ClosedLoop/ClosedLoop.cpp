@@ -1368,6 +1368,16 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 			moveInstance->GetCurrentMotion(driverNumber, now, mParams);
 		}
 
+		// Open-loop FOC: drive field angle from step clock, ignore encoder.
+		// Use M569 D2 (assistedOpen) to enable. Verifies commutation without a calibrated encoder.
+		if (currentMode == ClosedLoopMode::assistedOpen)
+		{
+			const uint16_t stepPhase = (uint16_t)llrintf(mParams.position * 1024.0f);
+			const uint16_t electricalAngle = (uint16_t)(((uint32_t)stepPhase * (uint32_t)polePairCount) % 4096u);
+			ApplyFocTorque(0.3f, electricalAngle);
+			return 0.3f;
+		}
+
 		const float targetPhysicalCount = (mParams.position * encoder->GetCountsPerStep()) * multiplier;
 		currentPositionError = (targetPhysicalCount - (float)encoder->GetCurrentCount()) * encoder->GetStepsPerCount() * multiplier;
 		speedFilter.ProcessReading(encoder->GetCurrentCount() * encoder->GetStepsPerCount(), now);
@@ -1390,6 +1400,34 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 		PIDDTerm = Kd * last_filtered_D;
 
 		PIDControlSignal = PIDPTerm + PIDITerm + PIDDTerm;
+
+		// FOC startup alignment: hold the rotor at angle 0 for a fixed dwell so the rotor
+		// aligns to a known field direction before closed-loop commutation begins.
+		constexpr StepTimer::Ticks alignDwellTicks = StepTimer::StepClockRate / 5;		// 200 ms
+		if (!focAlignmentDone)
+		{
+			if (!hasMovementCommand)
+			{
+				focAlignStartTick = now;								// no move yet — keep resetting the timer
+			}
+			else if ((StepTimer::Ticks)(now - focAlignStartTick) < alignDwellTicks)
+			{
+				ApplyFocTorque(0.3f, 0u);								// hold field at angle 0 with moderate torque
+				return 0.3f;
+			}
+			else
+			{
+				// Dwell complete: rotor is aligned to angle 0. Zero the encoder so that
+				// electricalAngle=0 corresponds to the actual rotor position.
+				encoder->Enable();
+				SetTargetToCurrentPosition();
+				PIDITerm = 0.0f;
+				last_vel_error = 0.0f;
+				last_filtered_D = 0.0f;
+				speedFilter.Reset();
+				focAlignmentDone = true;
+			}
+		}
 
 		// Compute electrical angle from encoder position and pole pair count
 		const int32_t encoderCount = encoder->GetCurrentCount();
@@ -1674,6 +1712,9 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 	}
 
 	// If we are disabling closed loop mode, we should ideally send steps to get the microstep counter to match the current phase here
+#if SUPPORT_FOC
+	if (mode == ClosedLoopMode::open) { focAlignmentDone = false; }
+#endif
 	currentMode = mode;
 
 	return true;

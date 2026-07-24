@@ -71,6 +71,47 @@ constexpr size_t MoveTaskStackWords = 220;
 
 static Task<MoveTaskStackWords> *moveTask;
 
+#if SUPPORT_CLOSED_LOOP && !HAS_SMART_DRIVERS
+
+constexpr uint32_t ClosedLoopSleepClocks = (StepTimer::StepClockRate * 80) / 1000000;	// 80µs at 750kHz step clock
+
+static Task<200> closedLoopTask;
+static StepTimer closedLoopTimer;
+static uint32_t clLastWakeupTime;
+static volatile bool closedLoopEnabled = false;
+
+static void ClosedLoopTimerCallback(CallbackParameter) noexcept
+{
+	closedLoopTask.GiveFromISR(NotifyIndices::Tmc);
+}
+
+extern "C" [[noreturn]] void ClosedLoopTaskLoop(void*) noexcept
+{
+	closedLoopTimer.SetCallback(ClosedLoopTimerCallback, (CallbackParameter)0);
+	for (;;)
+	{
+		if (!closedLoopEnabled)
+		{
+			TaskBase::TakeIndexed(NotifyIndices::Tmc);		// block until Move::Spin() signals ready
+			clLastWakeupTime = StepTimer::GetTimerTicks();
+		}
+		else
+		{
+			moveInstance->PhaseStepControlLoop();
+
+			clLastWakeupTime += ClosedLoopSleepClocks;
+			AtomicCriticalSectionLocker lock;
+			if (!closedLoopTimer.ScheduleCallback(clLastWakeupTime))
+			{
+				TaskBase::TakeIndexed(NotifyIndices::Tmc);	// wait for timer; ScheduleCallback returns false when scheduled
+			}
+			// ScheduleCallback returns true = time already past, loop immediately without waiting
+		}
+	}
+}
+
+#endif	// SUPPORT_CLOSED_LOOP && !HAS_SMART_DRIVERS
+
 extern "C" [[noreturn]] void MoveLoop(void * param) noexcept
 {
 	static_cast<Move*>(param)->TaskLoop();
@@ -256,6 +297,10 @@ void Move::Init() noexcept
 	ResetPhaseStepMonitoringVariables();
 # endif
 
+# if SUPPORT_CLOSED_LOOP && !HAS_SMART_DRIVERS
+	closedLoopTask.Create(ClosedLoopTaskLoop, "CLCtrl", nullptr, TaskPriority::TmcClosedLoop);
+# endif
+
 	moveTask = new Task<MoveTaskStackWords>;
 	moveTask->Create(MoveLoop, "Move", this, TaskPriority::MovePriority);
 }
@@ -392,6 +437,12 @@ void Move::Spin() noexcept
 	if (nextDriveToPoll == MaxSmartDrivers)
 	{
 		nextDriveToPoll = 0;
+	}
+#elif SUPPORT_CLOSED_LOOP
+	if (!closedLoopEnabled)
+	{
+		closedLoopEnabled = true;
+		closedLoopTask.Give(NotifyIndices::Tmc);
 	}
 #endif
 }
