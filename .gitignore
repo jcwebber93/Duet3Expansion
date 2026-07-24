@@ -72,3 +72,4 @@ src/ClosedLoop/ClosedLoop.bad_cascade.cpp
 .vscode/settings.json
 AI_Readme.txt
 Duet3Expansion FeatherM4CAN.launch
+AGENT_CONTRIBUTIONS.md
