@@ -118,6 +118,10 @@ namespace Platform
 	SharedSpiDevice *sharedSpi = nullptr;
 #endif
 
+#if SUPPORT_DRV8316_SPI
+	SharedSpiDevice *drv8316Spi = nullptr;
+#endif
+
 #if NUM_I2C_CHANNELS != 0
 	SharedI2CMaster *sharedI2C[NUM_I2C_CHANNELS] = { 0 };
 #endif
@@ -778,6 +782,10 @@ void Platform::Init()
 #if NUM_SHARED_SPI != 0
 	// Currently we support only 0 or 1 shared SPI channels
 	sharedSpi = new SharedSpiDevice(SharedSpiParams);
+#endif
+
+#if SUPPORT_DRV8316_SPI
+	drv8316Spi = new SharedSpiDevice(Drv8316SpiParams);
 #endif
 
 #if NUM_I2C_CHANNELS != 0

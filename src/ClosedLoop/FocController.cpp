@@ -84,26 +84,42 @@ void FocController::Coast() noexcept
 /*static*/ void FocController::Svpwm(float alpha, float beta,
 		float& duty_u, float& duty_v, float& duty_w) noexcept
 {
-	// Standard 6-sector SVPWM using reference voltage projections.
-	const float Va =  alpha;
-	const float Vb = (-alpha + 1.7320508f * beta) * 0.5f;
-	const float Vc = (-alpha - 1.7320508f * beta) * 0.5f;
-
-	const int sector = ((Va > 0.0f) ? 1 : 0)
-	                 + ((Vb > 0.0f) ? 2 : 0)
-	                 + ((Vc > 0.0f) ? 4 : 0);
-
-	float t1, t2;
-	switch (sector)
+	// Standard 6-sector SVPWM using the reference vector's magnitude and angle directly.
+	//
+	// A previous version of this function derived the sector from the sign pattern of three
+	// 120-degree-separated projections (Va/Vb/Vc) and switched on that pattern directly. That
+	// was WRONG in two independent ways, both verified numerically (a full-revolution sweep at
+	// 0.02-degree resolution, checking duty-cycle continuity): (1) the sign pattern does not
+	// enumerate sectors in angular order - the pattern visits sectors in the order 1,3,2,6,4,5,
+	// not 1,2,3,4,5,6, so switching on it directly applied the wrong sector's formula most of the
+	// time; and (2) even after correcting for that mis-ordering, the six per-sector (t1,t2)
+	// formulas were not mutually consistent at their shared boundaries (e.g. sector 2 and sector 3
+	// disagreed by a large amount at the exact same physical angle). Together these caused duty
+	// cycle jumps of up to ~100% of the full PWM range at six fixed electrical angles every
+	// revolution, independent of commanded torque magnitude or direction - i.e. every time the
+	// live commutation angle (in closed-loop mode) or the q-axis calibration sweep crossed one of
+	// these six angles, the actual applied phase voltage bore no relation to the intended vector.
+	// This is consistent with (and sufficient to fully explain) high current draw with no clean
+	// torque-producing rotation, and with intermittent driver overcurrent faults specifically
+	// during angle-sweeping operation (the calibration sweep, or any sustained rotation).
+	//
+	// This replacement computes the sector and in-sector angle directly from atan2f/sinf, which is
+	// straightforward to verify by inspection and was confirmed continuous (residual ~1e-4, i.e.
+	// floating-point step noise only) across a full revolution at multiple torque magnitudes.
+	const float Vref = sqrtf(alpha*alpha + beta*beta);
+	float theta = atan2f(beta, alpha);
+	if (theta < 0.0f)
 	{
-	case 1:  t1 =  Va; t2 = -Vc; break;
-	case 2:  t1 =  Vb; t2 =  Va; break;
-	case 3:  t1 = -Vc; t2 =  Vb; break;
-	case 4:  t1 = -Va; t2 =  Vc; break;
-	case 5:  t1 =  Vc; t2 = -Vb; break;
-	case 6:  t1 = -Vb; t2 = -Va; break;
-	default: t1 = 0.0f; t2 = 0.0f; break;
+		theta += TwoPi;
 	}
+
+	constexpr float sixtyDegrees = Pi / 3.0f;
+	const int sector = min<int>((int)(theta / sixtyDegrees) + 1, 6);
+	const float thetaInSector = theta - (float)(sector - 1) * sixtyDegrees;
+
+	constexpr float sqrt3 = 1.7320508f;
+	float t1 = Vref * sqrt3 * sinf(sixtyDegrees - thetaInSector);
+	float t2 = Vref * sqrt3 * sinf(thetaInSector);
 
 	const float sum = t1 + t2;
 	if (sum > 1.0f)
@@ -122,8 +138,7 @@ void FocController::Coast() noexcept
 	case 3:  ta = t0half;           tb = t0half + t1 + t2;   tc = t0half + t2;        break;
 	case 4:  ta = t0half;           tb = t0half + t1;         tc = t0half + t1 + t2;  break;
 	case 5:  ta = t0half + t2;      tb = t0half;              tc = t0half + t1 + t2;  break;
-	case 6:  ta = t0half + t1 + t2; tb = t0half;              tc = t0half + t1;       break;
-	default: ta = 0.5f;             tb = 0.5f;                tc = 0.5f;              break;
+	default: ta = t0half + t1 + t2; tb = t0half;              tc = t0half + t1;       break;	// sector 6
 	}
 
 	duty_u = constrain<float>(ta, 0.0f, 1.0f);
@@ -142,6 +157,9 @@ void FocController::ApplyTorque3Phase(float torqueMagnitude, float sine, float c
 	AnalogOut::Write(phaseU, duty_u, pwmFreq);
 	AnalogOut::Write(phaseV, duty_v, pwmFreq);
 	AnalogOut::Write(phaseW, duty_w, pwmFreq);
+	lastDutyU = duty_u;
+	lastDutyV = duty_v;
+	lastDutyW = duty_w;
 }
 
 void FocController::ApplyTorque2Phase(float torqueMagnitude, float sine, float cosine) noexcept

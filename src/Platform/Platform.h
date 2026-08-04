@@ -18,7 +18,7 @@
 # include "ClosedLoop/ClosedLoop.h"
 #endif
 
-#if NUM_SHARED_SPI != 0
+#if NUM_SHARED_SPI != 0 || SUPPORT_DRV8316_SPI
 # include <SPI/SharedSpiDevice.h>
 #endif
 
@@ -107,6 +107,11 @@ namespace Platform
 #if NUM_SHARED_SPI != 0
 	extern SharedSpiDevice *sharedSpi;
 	inline SharedSpiDevice& GetSharedSpi() noexcept { return *sharedSpi; }
+#endif
+
+#if SUPPORT_DRV8316_SPI
+	extern SharedSpiDevice *drv8316Spi;
+	inline SharedSpiDevice& GetDrv8316Spi() noexcept { return *drv8316Spi; }
 #endif
 
 #if NUM_I2C_CHANNELS != 0

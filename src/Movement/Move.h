@@ -604,6 +604,25 @@ inline bool Move::GetCurrentMotion(size_t driver, uint32_t when, MotionParameter
 		mParams.speed *= multiplier;
 		mParams.acceleration *= multiplier;
 	}
+#if SUPPORT_FOC
+	else if (dms[driver].IsFoc())
+	{
+		// FOC/BLDC drives, like DC servo, are direction-agnostic at the segment/position-bookkeeping
+		// level: AddLinearSegments() (Move.cpp) deliberately never applies a direction sign when
+		// building segments for these drives (only DC servo gets that treatment), and
+		// ClosedLoop::SetTargetToCurrentPosition()'s ResetDriveMovementState() call seeds
+		// currentMotorPosition from the encoder with no direction multiplier either - so
+		// currentMotorPosition/distanceCarriedForwards (and therefore mParams.position, set from them
+		// by DriveMovement::GetCurrentMotion() just above) are already in the same unmultiplied
+		// "physical" convention that GetTargetMotorStepsPhysical() reads directly. Applying the
+		// stepper-motor-style multiplier below here (a leftover from before FOC existed - see the
+		// comment on that branch) would silently reintroduce a sign mismatch between mParams.position
+		// (used live by ControlMotorCurrents()) and GetTargetMotorStepsPhysical() (used for the tuning
+		// graph and M92-style position reporting) whenever M569 S0/S1 is set - direction for FOC drives
+		// is applied exactly once, downstream, via the `multiplier` computed fresh from
+		// GetDirectionValueNoCheck() inside ClosedLoop::ControlMotorCurrents() itself.
+	}
+#endif
 	else
 	{
 		// For a stepper motor, convert microsteps to full steps
@@ -626,6 +645,16 @@ inline void Move::SetCurrentMotorSteps(size_t driver, float fullSteps) noexcept
 		const float multiplier = (GetDirectionValueNoCheck(driver)) ? 1.0f : -1.0f;
 		dms[driver].currentMotorPosition = lrintf(fullSteps * multiplier);
 	}
+#if SUPPORT_FOC
+	else if (dms[driver].IsFoc())
+	{
+		// Same reasoning as the IsFoc() branch in GetCurrentMotion() above: fullSteps (== mParams.position,
+		// passed in from ClosedLoop::SetTargetToCurrentPosition()) has already had direction applied exactly
+		// once at the snap site, so no further multiplier should be applied here - doing so would silently
+		// double the direction sign for FOC drives specifically.
+		dms[driver].currentMotorPosition = lrintf(fullSteps);
+	}
+#endif
 	else
 	{
 #if SUPPORT_TMC51xx

@@ -80,6 +80,12 @@ public:
 	bool IsDcServo() const noexcept { return false; }
 #endif
 
+#if SUPPORT_FOC
+	bool IsFoc() const noexcept { return closedLoopControl.IsFocMode(); }
+#else
+	bool IsFoc() const noexcept { return false; }
+#endif
+
 	// Returns the current target position in physical (internal) units, unaffected by the S0/S1 direction setting.
 	float GetTargetMotorStepsPhysical() const noexcept { return (float)currentMotorPosition + (float)distanceCarriedForwards; }
 #endif

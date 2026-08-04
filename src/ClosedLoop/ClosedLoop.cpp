@@ -106,7 +106,14 @@ void ClosedLoop::SetTargetToCurrentPosition() noexcept
 	const float physicalSteps = (float)encoder->GetCurrentCount() * encoder->GetStepsPerCount();
 	mParams.position = physicalSteps * multiplier;
 	moveInstance->SetCurrentMotorSteps(driverNumber, mParams.position);		// expects logical, converts to physical internally
-	moveInstance->ResetDriveMovementState(driverNumber, physicalSteps);		// expects physical units directly
+	// ResetDriveMovementState() seeds DriveMovement::positionAtMoveStart/positionAtSegmentStart/
+	// currentMotorPosition directly from this value with no further sign adjustment of its own
+	// (see DriveMovement::ResetState()) - GetCurrentMotion() later reconstructs mParams.position
+	// straight from those same fields, so this must be given the same signed (multiplied)
+	// convention as mParams.position above, not the raw unmultiplied physicalSteps. Passing the
+	// unmultiplied value here caused the very next GetCurrentMotion() re-fetch to silently
+	// overwrite the correctly-signed snap on line 107 with a wrong-signed one.
+	moveInstance->ResetDriveMovementState(driverNumber, mParams.position);
 }
 
 // Set the motor currents and update desiredStepPhase
@@ -239,7 +246,7 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 	uint16_t tempStepsPerRev = 200;
 	size_t numThresholds = 2;
 	float tempErrorThresholds[numThresholds];
-	float tempTorquePerAmp;
+	float tempTorquePerAmp = torquePerAmp;
 #if SUPPORT_DCSERVO
 	uint8_t tempDcOutputMode = (uint8_t)dcOutputMode;
 	float tempDcMaxCurrentTmc = dcMaxCurrentTmc;
@@ -247,6 +254,8 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 #endif
 #if SUPPORT_FOC
 	uint8_t tempPolePairCount = polePairCount;
+	float tempFocSupplyVoltage = focSupplyVoltage;
+	float tempFocVoltageLimit = focVoltageLimit;
 #endif
 
 	// Pull changed parameters
@@ -256,14 +265,43 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 						| parser.GetFloatParam('V', tempKv) | parser.GetFloatParam('A', tempKa);
 	const bool seenE = parser.GetFloatArrayParam('E', numThresholds, tempErrorThresholds);
 	const bool seenS = parser.GetUintParam('S', tempStepsPerRev);
+#if SUPPORT_FOC
+	// Q is shared: route to the FOC velocity limit when motor type is a FOC type (see focVelocityLimit
+	// in ClosedLoop.h for why), TMC torque-per-amp otherwise - same "read once, route by drive type"
+	// pattern as W below. Read once regardless, then assign after seenT is processed.
+	float tempQ = 0.0f;
+	const bool seenQRaw = parser.GetFloatParam('Q', tempQ);
+	const bool seenFocQ = seenQRaw && (motorType == EncoderType::bldc || motorType == EncoderType::stepperFoc || motorType == EncoderType::hybridStepperFoc
+								 || (seenT && (tempEncoderType == (uint32_t)EncoderType::bldc || tempEncoderType == (uint32_t)EncoderType::stepperFoc || tempEncoderType == (uint32_t)EncoderType::hybridStepperFoc)));
+	const bool seenQ = seenQRaw && !seenFocQ;
+	if (seenQRaw && !seenFocQ) { tempTorquePerAmp = tempQ; }
+	float tempFocVelocityLimit = focVelocityLimit;
+	if (seenFocQ) { tempFocVelocityLimit = tempQ; }
+#else
 	const bool seenQ = parser.GetFloatParam('Q', tempTorquePerAmp);
+#endif
 #if SUPPORT_DCSERVO
 	const bool seenU = parser.GetUintParam('U', tempDcOutputMode);
-	const bool seenW = parser.GetFloatParam('W', tempDcMaxCurrentTmc);
 	const bool seenZ = parser.GetUintParam('Z', tempDcTmcPhaseSelect);
 #endif
 #if SUPPORT_FOC
 	const bool seenL = parser.GetUintParam('L', tempPolePairCount);
+	float tempFocMaxTorque = focMaxTorque;
+	const bool seenN = parser.GetFloatParam('N', tempFocSupplyVoltage);
+	const bool seenO = parser.GetFloatParam('O', tempFocVoltageLimit);
+#endif
+#if SUPPORT_DCSERVO && SUPPORT_FOC
+	// W is shared: route to FOC max-torque when motor type is a FOC type, DC max-current otherwise.
+	// Read W once regardless, then assign below after seenT is processed.
+	float tempW = 0.0f;
+	const bool seenW = parser.GetFloatParam('W', tempW);
+	const bool seenFocW = seenW && (motorType == EncoderType::bldc || motorType == EncoderType::stepperFoc || motorType == EncoderType::hybridStepperFoc
+								 || (seenT && (tempEncoderType == (uint32_t)EncoderType::bldc || tempEncoderType == (uint32_t)EncoderType::stepperFoc || tempEncoderType == (uint32_t)EncoderType::hybridStepperFoc)));
+	if (seenW) { if (seenFocW) { tempFocMaxTorque = tempW; } else { tempDcMaxCurrentTmc = tempW; } }
+#elif SUPPORT_DCSERVO
+	const bool seenW = parser.GetFloatParam('W', tempDcMaxCurrentTmc);
+#elif SUPPORT_FOC
+	const bool seenFocW = parser.GetFloatParam('W', tempFocMaxTorque);
 #endif
 
 	// Report back if no parameters to change
@@ -272,7 +310,7 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 		|| seenU || seenW || seenZ
 #endif
 #if SUPPORT_FOC
-		|| seenL
+		|| seenL || seenFocW || seenN || seenO || seenFocQ
 #endif
 	)) {
 		if (encoder == nullptr)
@@ -293,6 +331,27 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 													(dcTmcPhaseSelect == 0) ? "TMC (phase A)" : "TMC (phase B)");
 				if (dcOutputMode == DcServoOutputMode::TmcSinglePhase) {
 					reply.catf(", max current %.2fA", (double)dcMaxCurrentTmc);
+				}
+			}
+#endif
+#if SUPPORT_FOC
+			if (motorType == EncoderType::bldc || motorType == EncoderType::stepperFoc || motorType == EncoderType::hybridStepperFoc)
+			{
+				if (focSupplyVoltage > 0.0f && focVoltageLimit > 0.0f)
+				{
+					reply.lcatf("FOC voltage limit %.2fV of %.2fV nominal supply (torque scale %.3f)", (double)focVoltageLimit, (double)focSupplyVoltage, (double)GetFocVoltageScale());
+				}
+				else
+				{
+					reply.lcat("FOC voltage limit not configured (N and O not set) - torqueMagnitude applied unscaled");
+				}
+				if (focVelocityLimit > 0.0f)
+				{
+					reply.lcatf("FOC velocity limit %.1f steps/sec", (double)focVelocityLimit);
+				}
+				else
+				{
+					reply.lcat("FOC velocity limit not configured (Q not set) - outer loop vel_target unclamped");
 				}
 			}
 #endif
@@ -334,6 +393,13 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 		reply.copy("Torque per amp must be positive");
 		return GCodeResult::error;
 	}
+#if SUPPORT_FOC
+	if (seenFocQ && tempFocVelocityLimit < 0.0)
+	{
+		reply.copy("FOC velocity limit must be non-negative (0 = unconfigured)");
+		return GCodeResult::error;
+	}
+#endif
 #if SUPPORT_DCSERVO
 	if (seenU && tempDcOutputMode > (uint8_t)DcServoOutputMode::TmcSinglePhase)
 	{
@@ -350,11 +416,45 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 		reply.copy("Z (TMC phase) must be 0 or 1");
 		return GCodeResult::error;
 	}
-
+#endif
+#if SUPPORT_FOC
+	if (seenFocW && (tempFocMaxTorque <= 0.0f || tempFocMaxTorque > 1.0f))
+	{
+		reply.copy("W (FOC max torque fraction) must be in range (0.0, 1.0]");
+		return GCodeResult::error;
+	}
+	if (seenN && tempFocSupplyVoltage <= 0.0f)
+	{
+		reply.copy("N (nominal supply voltage) must be positive");
+		return GCodeResult::error;
+	}
+	if (seenO && tempFocVoltageLimit <= 0.0f)
+	{
+		reply.copy("O (FOC voltage limit) must be positive");
+		return GCodeResult::error;
+	}
+	if (seenO && !seenN && focSupplyVoltage <= 0.0f)
+	{
+		reply.copy("O (FOC voltage limit) requires N (nominal supply voltage) to be set, either now or previously");
+		return GCodeResult::error;
+	}
+#endif
+#if SUPPORT_DCSERVO
 	if (seenT && tempEncoderType == EncoderType::dcServo)
 	{
 		// For DC servo control, we force a 1:1 mapping of steps to quadrature encoder counts.
 		// The user's M92 steps/mm should be set to the encoder's quadrature counts/mm.
+		tempStepsPerRev = (uint16_t)(tempCPR * 4);
+	}
+#endif
+#if SUPPORT_FOC
+	if (seenT && (tempEncoderType == (uint8_t)EncoderType::bldc
+				|| tempEncoderType == (uint8_t)EncoderType::stepperFoc
+				|| tempEncoderType == (uint8_t)EncoderType::hybridStepperFoc)
+			&& seenC)
+	{
+		// For FOC motors, force a 1:1 mapping of steps to quadrature encoder counts, matching the DC servo convention.
+		// Set M92 to the encoder's quadrature counts per unit of travel (CPR * 4 per revolution).
 		tempStepsPerRev = (uint16_t)(tempCPR * 4);
 	}
 #endif
@@ -416,6 +516,22 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 		if (seenL)
 		{
 			polePairCount = tempPolePairCount;
+		}
+		if (seenFocW)
+		{
+			focMaxTorque = tempFocMaxTorque;
+		}
+		if (seenN)
+		{
+			focSupplyVoltage = tempFocSupplyVoltage;
+		}
+		if (seenO)
+		{
+			focVoltageLimit = tempFocVoltageLimit;
+		}
+		if (seenFocQ)
+		{
+			focVelocityLimit = tempFocVelocityLimit;
 		}
 #endif
 		if (seenT)
@@ -498,7 +614,15 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 				focController = new FocController(FocPhaseUPin, FocPhaseVPin, FocPhaseWPin,
 													FocPhaseUFn, FocPhaseVFn, FocPhaseWFn, focMode);
 				focController->Init(FocPwmFrequency);
+				InitFocDriverFaultPin();
 				motorType = (EncoderType)tempEncoderType;
+#if SUPPORT_DRV8316_SPI
+				if (drv8316 == nullptr)
+				{
+					drv8316 = new DRV8316(Platform::GetDrv8316Spi(), Drv8316CsPin);
+					drv8316->Init();
+				}
+#endif
 			}
 			break;
 
@@ -960,6 +1084,18 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 		return;
 	}
 
+	// Poll DRV8316 fault registers at ~10 ms intervals (125 ticks × 80 µs = 10 ms)
+#if SUPPORT_DRV8316_SPI
+	if (drv8316 != nullptr)
+	{
+		if (++drv8316PollCounter >= 125u)
+		{
+			drv8316PollCounter = 0;
+			drv8316->PollFaults();
+		}
+	}
+#endif
+
 	// Read the current state of the drive.
 	if (encoder->TakeReading())
 	{
@@ -1019,6 +1155,25 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 					dataCollectionStartTicks = whenNextSampleDue = now;
 					samplingMode = RecordingMode::Immediate;
 				}
+			}
+
+			// Collect a sample, if we need to
+			if (samplingMode == RecordingMode::Immediate && (int32_t)(now - whenNextSampleDue) >= 0)
+			{
+				CollectSample();
+				whenNextSampleDue += dataCollectionIntervalTicks;
+			}
+
+			// Update the statistics
+			{
+				TaskCriticalSectionLocker lock;
+				const float absPositionError = fabsf(currentPositionError);
+				if (absPositionError > periodMaxAbsPositionError) { periodMaxAbsPositionError = absPositionError; }
+				periodSumOfPositionErrorSquares += fsquare(currentPositionError);
+				const float currentFraction = fabsf(PIDControlSignal) / 256.0f;
+				if (currentFraction > periodMaxCurrentFraction) { periodMaxCurrentFraction = currentFraction; }
+				periodSumOfCurrentFractions += currentFraction;
+				++periodNumSamples;
 			}
 		}
 		else
@@ -1230,30 +1385,36 @@ void ClosedLoop::CollectSample() noexcept
 	{
 		sampleBuffer.PutF32(TickPeriodToMillis(StepTimer::GetMovementTimerTicks() - dataCollectionStartTicks));		// always collect this
 
-		if (filterRequested & CL_RECORD_RAW_ENCODER_READING) 	{ sampleBuffer.PutI32(encoder->GetCurrentCount()); }
-		if (filterRequested & CL_RECORD_CURRENT_MOTOR_STEPS) 	{ sampleBuffer.PutF32((float)encoder->GetCurrentCount() * encoder->GetStepsPerCount()); }
-		if (filterRequested & CL_RECORD_TARGET_MOTOR_STEPS)
-		{
-#if SUPPORT_DCSERVO
-			// For DC servo use the raw physical position from DriveMovement, which is unaffected by the S0/S1
-			// direction setting and is directly comparable to CL_RECORD_CURRENT_MOTOR_STEPS.
-			if (isDcServoMode)
-			{
-				sampleBuffer.PutF32(moveInstance->GetTargetMotorStepsPhysical(driverNumber));
-			}
-			else
-#endif
-			{
-				sampleBuffer.PutF32(mParams.position);
-			}
-		}
-		// For DC servo, logical-space values are sign-flipped when S0 direction is active. Apply dcServoMultiplier to
-		// convert them back to physical space so all chart traces are consistent with measured/target position.
-#if SUPPORT_DCSERVO
-		const float recordMultiplier = (isDcServoMode) ? dcServoMultiplier : 1.0f;
+		// Logical-space PID values (and, below, measured/target position) are sign-flipped when S0
+		// direction is active. Apply the direction multiplier consistently to ALL of them so every
+		// chart trace is plotted in the same sense: when the control loop is converging, Measured
+		// Motor Steps visually tracks Target Motor Steps 1:1 regardless of which physical rotation
+		// direction (clockwise/counterclockwise) S0/S1 or the motor's encoder wiring happen to
+		// correspond to. Without this, Measured was logged in raw physical (encoder) space while the
+		// control loop's actual convergence criterion (currentPositionError, which DOES get this
+		// multiplier) is in direction-adjusted logical space - so a perfectly-tracking motor could
+		// show Target and Measured moving in visually opposite directions on the tuning graph, making
+		// a correctly-functioning drive look like it was spinning the wrong way.
+#if SUPPORT_DCSERVO && SUPPORT_FOC
+		const float recordMultiplier = isDcServoMode ? dcServoMultiplier
+								: (motorType == EncoderType::bldc || motorType == EncoderType::stepperFoc || motorType == EncoderType::hybridStepperFoc) ? focMultiplier
+								: 1.0f;
+#elif SUPPORT_DCSERVO
+		const float recordMultiplier = isDcServoMode ? dcServoMultiplier : 1.0f;
+#elif SUPPORT_FOC
+		const float recordMultiplier = (motorType == EncoderType::bldc || motorType == EncoderType::stepperFoc || motorType == EncoderType::hybridStepperFoc) ? focMultiplier : 1.0f;
 #else
 		constexpr float recordMultiplier = 1.0f;
 #endif
+
+		if (filterRequested & CL_RECORD_RAW_ENCODER_READING) 	{ sampleBuffer.PutI32(encoder->GetCurrentCount()); }
+		if (filterRequested & CL_RECORD_CURRENT_MOTOR_STEPS) 	{ sampleBuffer.PutF32((float)encoder->GetCurrentCount() * encoder->GetStepsPerCount() * recordMultiplier); }
+		// mParams.position is already in the same direction-adjusted convention as
+		// CL_RECORD_CURRENT_MOTOR_STEPS above for every drive type: DC servo and FOC/BLDC never had a
+		// stepper-style direction multiplier applied to it (Move::GetCurrentMotion() explicitly skips
+		// that for both - see IsDcServo()/IsFoc() there), and for a classic stepper it already carries
+		// the microstep-shift-adjusted multiplier from that same function. No further scaling needed.
+		if (filterRequested & CL_RECORD_TARGET_MOTOR_STEPS) 	{ sampleBuffer.PutF32(mParams.position); }
 		if (filterRequested & CL_RECORD_CURRENT_ERROR) 			{ sampleBuffer.PutF32(currentPositionError * recordMultiplier); }
 		if (filterRequested & CL_RECORD_PID_CONTROL_SIGNAL)  	{ sampleBuffer.PutF16(PIDControlSignal * recordMultiplier); }
 		if (filterRequested & CL_RECORD_PID_P_TERM)
@@ -1281,20 +1442,77 @@ void ClosedLoop::CollectSample() noexcept
 			{ sampleBuffer.PutF16(PIDDTerm * recordMultiplier); }
 		}
 		if (filterRequested & CL_RECORD_CURRENT_STEP_PHASE)  	{ sampleBuffer.PutU16(encoder->GetCurrentPhasePosition()); }
-		if (filterRequested & CL_RECORD_DESIRED_STEP_PHASE)  	{ sampleBuffer.PutU16(desiredStepPhase); }
+		if (filterRequested & CL_RECORD_DESIRED_STEP_PHASE)
+		{
+#if SUPPORT_FOC
+			// desiredStepPhase is unused by the FOC path during normal running (only set once at
+			// alignment, never touched by ControlMotorCurrents() for a BLDC/FOC drive - see
+			// SetMotorPhase(), which is the legacy-stepper-only writer of this field) - repurposed here
+			// to log the live external gate-driver nFAULT pin state (see FocDriverFaultPin, board
+			// config), sampled fresh every control tick regardless of mode. 1 = fault currently
+			// asserted, 0 = OK. This gives direct visibility into a driver fault (e.g. the
+			// SimpleFOCMini's DRV8313 tripping overcurrent protection) correlated exactly against the
+			// sample/torque/angle it occurred at, which the DRV8316 SPI fault path (drv8316PollFaults())
+			// cannot provide for a DRV8313, since it has no SPI interface at all.
+			if (motorType == EncoderType::bldc || motorType == EncoderType::stepperFoc || motorType == EncoderType::hybridStepperFoc)
+			{
+				sampleBuffer.PutU16(lastFocDriverFault ? 1u : 0u);
+			}
+			else
+#endif
+			{
+				sampleBuffer.PutU16(desiredStepPhase);
+			}
+		}
 		if (filterRequested & CL_RECORD_PHASE_SHIFT)  			{ sampleBuffer.PutF16(vel_measured * recordMultiplier); }
-		if (filterRequested & CL_RECORD_COIL_A_CURRENT) 		{ sampleBuffer.PutI16(coilA); }
-		if (filterRequested & CL_RECORD_COIL_B_CURRENT) 		{ sampleBuffer.PutI16(coilB); }
-		if (filterRequested & CL_RECORD_PID_V_TERM)  			{ sampleBuffer.PutF16(PIDVTerm * recordMultiplier); }
+		if (filterRequested & CL_RECORD_COIL_A_CURRENT)
+		{
+#if SUPPORT_FOC
+			// coilA/coilB are unused by the FOC path (stepper-phase-control fields) - repurposed here to
+			// log the raw electricalAngle actually passed to ApplyFocTorque(), for diagnosing whether the
+			// commanded SVPWM angle is behaving as expected independent of duty cycle/PID term values.
+			if (focController != nullptr) { sampleBuffer.PutI16((int16_t)lastFocElectricalAngle); }
+			else
+#endif
+			{ sampleBuffer.PutI16(coilA); }
+		}
+		if (filterRequested & CL_RECORD_COIL_B_CURRENT)
+		{
+#if SUPPORT_FOC
+			// Repurposed to log the raw torqueMagnitude ([-1,1]) actually passed to ApplyFocTorque(),
+			// scaled by 1000 to preserve resolution in an integer field (e.g. -250 = torqueMagnitude -0.25).
+			if (focController != nullptr) { sampleBuffer.PutI16((int16_t)lrintf(lastFocTorqueMagnitude * 1000.0f)); }
+			else
+#endif
+			{ sampleBuffer.PutI16(coilB); }
+		}
+		if (filterRequested & CL_RECORD_PID_V_TERM)
+		{
+#if SUPPORT_FOC
+			// TEMPORARILY repurposed for FOC drives to log lastFocVelTargetRaw*1000 (the raw, pre-
+			// focVelocityLimit-clamp vel_target snapshot, see ControlMotorCurrents()) instead of PIDVTerm,
+			// to directly compare commanded vs measured velocity (CL_RECORD_PHASE_SHIFT/vel_measured)
+			// while investigating the C-vs-stall-location pattern. Revert to PIDVTerm once resolved.
+			if (motorType == EncoderType::bldc || motorType == EncoderType::stepperFoc || motorType == EncoderType::hybridStepperFoc)
+			{
+				sampleBuffer.PutF16(lastFocVelTargetRaw * 1000.0f);
+			}
+			else
+#endif
+			{ sampleBuffer.PutF16(PIDVTerm * recordMultiplier); }
+		}
 		if (filterRequested & CL_RECORD_PID_A_TERM)  			{ sampleBuffer.PutF16(PIDATerm * recordMultiplier); }
 		if (filterRequested & CL_RECORD_PID_J_TERM)				{ sampleBuffer.PutF16(PIDJTerm * recordMultiplier); }
 		if (filterRequested & CL_RECORD_MEASURED_VELOCITY)
 		{
-#if SUPPORT_DCSERVO
-			if (isDcServoMode)
+#if SUPPORT_DCSERVO || SUPPORT_FOC
+			if (isDcServoMode
+# if SUPPORT_FOC
+				|| motorType == EncoderType::bldc || motorType == EncoderType::stepperFoc || motorType == EncoderType::hybridStepperFoc
+# endif
+			)
 			{
-				// For DC Servos, convert velocity to mm/sec for charting to make it human-readable.
-				// The internal PID loop continues to use counts/tick.
+				// Convert velocity from counts/tick to mm/sec for human-readable charting.
 				const float vel_mm_per_sec = (vel_measured * recordMultiplier * StepTimer::StepClockRate) / moveInstance->DriveStepsPerMm(driverNumber);
 				sampleBuffer.PutF16(vel_mm_per_sec);
 			}
@@ -1382,33 +1600,57 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 		|| motorType == EncoderType::stepperFoc
 		|| motorType == EncoderType::hybridStepperFoc)
 	{
+		lastFocDriverFault = ReadFocDriverFault();						// sample every tick, before any mode-specific logic/early return, so a fault is caught the instant it happens
+
 		const float multiplier = (moveInstance->GetDirectionValueNoCheck(driverNumber)) ? 1.0f : -1.0f;
+		focMultiplier = multiplier;									// persist for CollectSample to convert logical→physical space
 
 		const bool hadMovementCommand = hasMovementCommand;
 		hasMovementCommand = moveInstance->GetCurrentMotion(driverNumber, now, mParams);
 		if (hasMovementCommand && !hadMovementCommand)
 		{
+			// Start of a new move: resynchronise planner origin to current encoder position and clear integrator history.
 			SetTargetToCurrentPosition();
 			PIDITerm = 0.0f;
 			last_vel_error = 0.0f;
 			last_filtered_D = 0.0f;
 			speedFilter.Reset();
-			moveInstance->GetCurrentMotion(driverNumber, now, mParams);
+			moveInstance->GetCurrentMotion(driverNumber, now, mParams); // Re-fetch after resync
 		}
 
 		// Open-loop FOC: drive field angle from step clock, ignore encoder.
-		// Use M569 D2 (assistedOpen) to enable. Verifies commutation without a calibrated encoder.
+		// Use M569 D5 (assistedOpen) to enable. Verifies commutation without a calibrated encoder.
 		if (currentMode == ClosedLoopMode::assistedOpen)
 		{
-			const uint16_t stepPhase = (uint16_t)llrintf(mParams.position * 1024.0f);
-			const uint16_t electricalAngle = (uint16_t)(((uint32_t)stepPhase * (uint32_t)polePairCount) % 4096u);
-			ApplyFocTorque(0.3f, electricalAngle);
-			return 0.3f;
+			// Deliberately does NOT apply focElectricalAngleOffset: this mode exists specifically to
+			// verify raw commutation (direction, pole-pair/CPR scaling) independent of encoder-position
+			// calibration, so it should behave identically regardless of alignment/offset correctness.
+			// mParams.position is in counts (1:1 with encoder counts). One electrical revolution = countsPerRev / polePairCount.
+			const uint32_t countsPerElecRev = encoder->GetStepsPerRev() / polePairCount;
+			uint16_t electricalAngle = 0;
+			if (countsPerElecRev > 0)
+			{
+				int32_t remainder = (int32_t)llrintf(mParams.position) % (int32_t)countsPerElecRev;
+				if (remainder < 0) { remainder += (int32_t)countsPerElecRev; }
+				electricalAngle = (uint16_t)(((uint32_t)remainder * 4096u) / countsPerElecRev);
+			}
+			// Raised from an earlier fixed 0.3f cap: at low torque, the open-loop field can lose sync with
+			// the rotor as the commanded electrical angle advances (rotor "slips" and snaps back, similar
+			// to a stepper losing steps under too little holding torque for the commanded speed/inertia),
+			// which looks like desynchronised/jumping motion rather than clean 1:1 tracking. 0.6 gives more
+			// headroom to stay locked, while still being well under full authority and further bounded by
+			// focMaxTorque and the voltage scale.
+			const float assistedTorque = min<float>(0.6f, focMaxTorque) * GetFocVoltageScale();
+			lastFocElectricalAngle = electricalAngle;
+			lastFocTorqueMagnitude = assistedTorque;
+			ApplyFocTorque(assistedTorque, electricalAngle);
+			return assistedTorque;
 		}
 
+		const int32_t encoderCount = encoder->GetCurrentCount();
 		const float targetPhysicalCount = (mParams.position * encoder->GetCountsPerStep()) * multiplier;
-		currentPositionError = (targetPhysicalCount - (float)encoder->GetCurrentCount()) * encoder->GetStepsPerCount() * multiplier;
-		speedFilter.ProcessReading(encoder->GetCurrentCount() * encoder->GetStepsPerCount(), now);
+		currentPositionError = (targetPhysicalCount - (float)encoderCount) * encoder->GetStepsPerCount() * multiplier;
+		speedFilter.ProcessReading((float)encoderCount * encoder->GetStepsPerCount(), now);
 
 		const float timeDelta = (float)ticksSinceLastCall * (1.0f / (float)StepTimer::StepClockRate);
 
@@ -1416,7 +1658,21 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 		PIDJTerm = Kpp * currentPositionError;
 		PIDVTerm = Kv * mParams.speed;
 		PIDATerm = Ka * mParams.acceleration * (float)ticksSinceLastCall;
-		const float vel_target = PIDJTerm + PIDVTerm + PIDATerm;
+		float vel_target = PIDJTerm + PIDVTerm + PIDATerm;
+		lastFocVelTargetRaw = vel_target;		// TEMPORARY DEBUG: snapshot before the clamp below, see CollectSample()
+
+		// Clamp vel_target to focVelocityLimit (M569.1 Q, steps/sec), mirroring SimpleFOC's
+		// P_angle.limit/velocity_limit - see the declaration of focVelocityLimit in ClosedLoop.h for the
+		// full rationale. Without this, PIDJTerm (and so vel_target) only grows as large as the position
+		// error has already accumulated, so a stalled rotor only gets a strong demand well after the fact
+		// rather than an immediate, saturated one on the very first tick of a large error - confirmed to
+		// be the key structural difference from SimpleFOC's equivalent, fault-free behaviour on the same
+		// hardware. 0 means "not configured" - falls back to the pre-existing unclamped behaviour.
+		if (focVelocityLimit > 0.0f)
+		{
+			const float velocityLimitStepsPerTick = focVelocityLimit / (float)StepTimer::StepClockRate;
+			vel_target = constrain<float>(vel_target, -velocityLimitStepsPerTick, velocityLimitStepsPerTick);
+		}
 
 		// Inner velocity loop (PID)
 		vel_measured = speedFilter.GetDerivative() * multiplier;
@@ -1429,47 +1685,48 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 
 		PIDControlSignal = PIDPTerm + PIDITerm + PIDDTerm;
 
-		// FOC startup alignment: hold the rotor at angle 0 for a fixed dwell so the rotor
-		// aligns to a known field direction before closed-loop commutation begins.
-		constexpr StepTimer::Ticks alignDwellTicks = StepTimer::StepClockRate / 5;		// 200 ms
-		if (!focAlignmentDone)
-		{
-			if (!hasMovementCommand)
-			{
-				focAlignStartTick = now;								// no move yet — keep resetting the timer
-			}
-			else if ((StepTimer::Ticks)(now - focAlignStartTick) < alignDwellTicks)
-			{
-				ApplyFocTorque(0.3f, 0u);								// hold field at angle 0 with moderate torque
-				return 0.3f;
-			}
-			else
-			{
-				// Dwell complete: rotor is aligned to angle 0. Zero the encoder so that
-				// electricalAngle=0 corresponds to the actual rotor position.
-				encoder->Enable();
-				SetTargetToCurrentPosition();
-				PIDITerm = 0.0f;
-				last_vel_error = 0.0f;
-				last_filtered_D = 0.0f;
-				speedFilter.Reset();
-				focAlignmentDone = true;
-			}
-		}
-
-		// Compute electrical angle from encoder position and pole pair count
-		const int32_t encoderCount = encoder->GetCurrentCount();
+		// Compute electrical angle from encoder count, plus the correction found by the post-alignment
+		// q-axis verification pulse (see focElectricalAngleOffset in ClosedLoop.h) so that a positive
+		// torqueMagnitude command genuinely produces q-axis (torque-maximising) rather than a partially-
+		// or wholly-d-axis (non-rotating) vector.
 		const uint32_t countsPerElecRev = (uint32_t)((encoder->GetCountsPerStep() * (float)encoder->GetStepsPerRev()) / (float)polePairCount);
 		uint16_t electricalAngle = 0;
 		if (countsPerElecRev > 0)
 		{
 			int32_t remainder = encoderCount % (int32_t)countsPerElecRev;
 			if (remainder < 0) { remainder += (int32_t)countsPerElecRev; }
-			electricalAngle = (uint16_t)(((uint32_t)remainder * 4096u) / countsPerElecRev);
+			electricalAngle = (uint16_t)((((uint32_t)remainder * 4096u) / countsPerElecRev + focElectricalAngleOffset) & 4095u);
 		}
 
-		// Torque magnitude in [-1, 1]: scale control signal by multiplier and normalise
-		const float torqueMagnitude = constrain<float>((PIDControlSignal * multiplier) / 256.0f, -1.0f, 1.0f);
+		// Torque magnitude in [-1, 1]: scale control signal by multiplier, normalise, and clamp to focMaxTorque.
+		// The clamp is further scaled by GetFocVoltageScale() (M569.1 N/O): when a real supply voltage and
+		// voltage limit are configured, this converts focMaxTorque (a fraction of the FULL, possibly much
+		// higher, supply voltage) into a fraction of a known, predictable voltage ceiling instead - see
+		// FocController::ApplyTorque, which otherwise applies torqueMagnitude directly as a duty-cycle
+		// fraction of the entire supply with no voltage scaling of its own.
+		const float focVoltageScale = GetFocVoltageScale();
+		const float rawTorqueMagnitude = constrain<float>((PIDControlSignal * multiplier) / 256.0f, -focMaxTorque * focVoltageScale, focMaxTorque * focVoltageScale);
+
+		// Continuous slew-rate limit: bound how fast the torque actually sent to the driver can change,
+		// regardless of how large rawTorqueMagnitude's jump is (e.g. from a sudden hand-induced position
+		// error, or right after alignment where focAppliedTorque starts at 0). Without this, a large raw
+		// PID output can swing the commanded torque from ~0 to the focMaxTorque clamp within a single
+		// ~80us control tick, which is a much faster current di/dt than the driver may tolerate. This
+		// mirrors SimpleFOC's PID output_ramp (a volts/sec slew limit on the analogous Uq voltage command),
+		// which is what let the same DRV8313 driver run fault-free under SimpleFOC.
+		//
+		// Disabled by default (focTorqueRampEnabled) - see the declaration in ClosedLoop.h for why: this
+		// rate made torqueMagnitude climb too slowly to reach breakaway torque from rest before the target
+		// had moved further away, reliably stalling closed-loop motion after a few hundred encoder counts.
+		float torqueMagnitude = rawTorqueMagnitude;
+		if (focTorqueRampEnabled)
+		{
+			const float maxTorqueStep = focTorqueRampRate * timeDelta;
+			torqueMagnitude = constrain<float>(rawTorqueMagnitude, focAppliedTorque - maxTorqueStep, focAppliedTorque + maxTorqueStep);
+		}
+		focAppliedTorque = torqueMagnitude;
+		lastFocElectricalAngle = electricalAngle;
+		lastFocTorqueMagnitude = torqueMagnitude;
 		ApplyFocTorque(torqueMagnitude, electricalAngle);
 
 		last_vel_error = vel_error;
@@ -1619,7 +1876,14 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 {
 	reply.printf("Closed loop driver %u mode: %s", driver, GetModeText());
 	reply.catf(", pre-error threshold: %.2f, error threshold: %.2f", (double) errorThresholds[0], (double) errorThresholds[1]);
-	reply.catf(", encoder type %s", GetEncoderType().ToString());
+	if (motorType == EncoderType::bldc || motorType == EncoderType::stepperFoc || motorType == EncoderType::hybridStepperFoc)
+	{
+		reply.catf(", motor type %s (sensor: %s)", motorType.ToString(), GetEncoderType().ToString());
+	}
+	else
+	{
+		reply.catf(", encoder type %s", GetEncoderType().ToString());
+	}
 	if (encoder != nullptr)
 	{
 		if (!encoder->TakeReading())
@@ -1654,7 +1918,57 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 				moveInstance->GetCurrentMotorPosition(driverNumber), (double)moveInstance->GetDistanceCarriedForwards(driverNumber));
 		}
 #endif
+#if SUPPORT_FOC
+		if (motorType == EncoderType::bldc || motorType == EncoderType::stepperFoc || motorType == EncoderType::hybridStepperFoc)
+		{
+			reply.lcatf("FOC: motorType=%u alignDone=%d hasMove=%d pos=%.2f polePairs=%u maxTorque=%.3f",
+				(unsigned)motorType.ToBaseType(), (int)focAlignmentDone, (int)hasMovementCommand,
+				(double)mParams.position, (unsigned)polePairCount, (double)focMaxTorque);
+			// Direct comparison: mParams.position is what ControlMotorCurrents() actually uses (live DDA
+			// value); GetTargetMotorStepsPhysical() is what CollectSample() logs as "Target Motor Steps".
+			// These are expected to be numerically equal (both ultimately derived from the same
+			// currentMotorPosition/distanceCarriedForwards state) - if they disagree, that is the bug.
+			reply.lcatf("FOC position cross-check: mParams.position=%.2f GetTargetMotorStepsPhysical=%.2f encoderCount=%" PRIi32 " focMultiplier=%.1f",
+				(double)mParams.position, (double)moveInstance->GetTargetMotorStepsPhysical(driverNumber),
+				(encoder != nullptr) ? encoder->GetCurrentCount() : 0, (double)focMultiplier);
+			{
+				const float electricalAngleDegrees = ((float)lastFocElectricalAngle * 360.0f) / 4096.0f;
+				reply.lcatf("FOC last torque command: electricalAngle=%u (%.1fdeg) torqueMagnitude=%.4f encoderCount=%" PRIi32,
+					(unsigned)lastFocElectricalAngle, (double)electricalAngleDegrees, (double)lastFocTorqueMagnitude,
+					(encoder != nullptr) ? encoder->GetCurrentCount() : 0);
+			}
+			if (focController != nullptr)
+			{
+				reply.lcatf("FOC duties: U=%.3f V=%.3f W=%.3f",
+					(double)focController->lastDutyU, (double)focController->lastDutyV, (double)focController->lastDutyW);
+			}
+			else
+			{
+				reply.lcat("FOC: focController is NULL");
+			}
+		}
+#endif
 	}
+
+#if SUPPORT_DRV8316_SPI
+	if (drv8316 != nullptr)
+	{
+		if (drv8316->IsPresent())
+		{
+			reply.lcatf("DRV8316: IC_Status=0x%02x Status1=0x%02x Status2=0x%02x%s",
+				drv8316->GetIcStatus(), drv8316->GetStatus1(), drv8316->GetStatus2(),
+				drv8316->HasFault() ? " FAULT" : " ok");
+		}
+		else
+		{
+			reply.lcat("DRV8316: SPI no response (check wiring, nSLEEP)");
+		}
+	}
+	else
+	{
+		reply.lcat("DRV8316: not configured (M569.1 T5 not yet sent)");
+	}
+#endif
 
 	//DEBUG
 	//reply.catf(", event status 0x%08" PRIx32 ", TCC2 CTRLA 0x%08" PRIx32 ", TCC2 EVCTRL 0x%08" PRIx32, EVSYS->CHSTATUS.reg, QuadratureTcc->CTRLA.reg, QuadratureTcc->EVCTRL.reg);
@@ -1676,6 +1990,14 @@ StandardDriverStatus ClosedLoop::ReadLiveStatus() const noexcept
 	result.closedLoopPositionWarning = preStall;
 	result.closedLoopNotTuned = ((tuningError & encoder->MinimalTuningNeeded()) != 0);
 	result.closedLoopTuningError = ((tuningError & TuningError::AnyTuningFailure) != 0);
+#if SUPPORT_DRV8316_SPI
+	if (drv8316 != nullptr && drv8316->IsPresent() && drv8316->HasFault())
+	{
+		result.closedLoopPositionNotMaintained = true;	// gate driver fault
+		if (drv8316->HasOtw()) { result.otpw = true; }	// over-temperature warning
+		if (drv8316->HasOcp()) { result.s2ga = true; }	// use short-to-ground as proxy for OCP
+	}
+#endif
 	return result;
 }
 
@@ -1743,18 +2065,318 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 		PIDITerm = 0.0;
 		errorDerivativeFilter.Reset();
 		speedFilter.Reset();
-		SetTargetToCurrentPosition();
 
-		// Set the target position to the current position
-		ResetError();													// this calls ReadState again and sets up targetMotorSteps
+		// Set the target position to the current position (ResetError() calls SetTargetToCurrentPosition()
+		// internally, among other things). For FOC motors entering closed loop, both are deferred until
+		// after the alignment dwell below zeroes the encoder at the rotor's true electrical-zero rest
+		// position: calling either here would seed targetMotorSteps from the pre-alignment (effectively
+		// meaningless) encoder reading, and that stale value could then be observed by the periodic
+		// control-loop task if it samples state in between the alignment dwell zeroing the encoder and
+		// re-syncing the target below.
+#if SUPPORT_FOC
+		if (!(mode == ClosedLoopMode::closed
+				&& focController != nullptr
+				&& (motorType == EncoderType::bldc
+					|| motorType == EncoderType::stepperFoc
+					|| motorType == EncoderType::hybridStepperFoc)))
+#endif
+		{
+			ResetError();												// this calls ReadState again, sets up targetMotorSteps, and clears any latched stall
+		}
 
 		moveInstance->ResetPhaseStepMonitoringVariables();				// to avoid getting stupid values
 		moveInstance->ResetPhaseStepControlLoopCallTime();				// to avoid huge integral term windup
+
+#if SUPPORT_FOC
+		// FOC closed-loop: run the alignment dwell now, before any move is queued.
+		// Hold the field at angle 0 for 200ms so the rotor settles to a known position,
+		// then enable the encoder (zeroed at that position) and mark alignment done.
+		// This runs on the calling task (command processor), not the control loop task.
+		if (mode == ClosedLoopMode::closed
+			&& focController != nullptr
+			&& (motorType == EncoderType::bldc
+				|| motorType == EncoderType::stepperFoc
+				|| motorType == EncoderType::hybridStepperFoc))
+		{
+#if SUPPORT_DRV8316_SPI
+			if (drv8316 != nullptr) { drv8316->ClearFaults(); }
+#endif
+			// Read the rotor position before the alignment pull, so we can sanity-check afterwards
+			// that the pull actually moved the rotor a plausible amount (cf. SimpleFOC's alignSensor(),
+			// which verifies real motion/direction before trusting the calibration).
+			encoder->TakeReading();
+			const int32_t preAlignCount = encoder->GetCurrentCount();
+
+			const StepTimer::Ticks alignStart = StepTimer::GetTimerTicks();
+			// NB: SetClosedLoopEnabled() runs synchronously on the command-processor task while the main
+			// board waits for a CAN reply with a fixed ~1000ms timeout (CanInterface::UsualResponseTimeout
+			// on the main board side) - the WHOLE alignment sequence below must fit comfortably under that
+			// budget or M569 D4/M569.1 will time out and the main board will report "CAN response timeout".
+			// Keep the total well under 900ms.
+			//
+			// Alignment torque is capped by focMaxTorque (M569.1 W), same ceiling as running torque, so
+			// a user who has reduced W gets a correspondingly reduced alignment pull too, rather than a
+			// fixed 0.5 regardless of W. Also scaled by GetFocVoltageScale() (M569.1 N/O) so that, once
+			// configured, the alignment pull respects the same real-volts ceiling as running torque
+			// instead of being an unscaled fraction of the full, possibly much higher, supply voltage.
+			const float alignTorque = min<float>(0.5f, focMaxTorque) * GetFocVoltageScale();
+			constexpr uint16_t alignTargetAngle = 0u;
+
+			// Sweep the commanded field angle continuously through one full electrical revolution ending
+			// at alignTargetAngle, instead of jumping straight to a fixed angle and holding it (the old
+			// approach). A held fixed-angle pull is completely open-loop AND static: if a detent/cogging
+			// point lies between the rotor's (unknown) starting position and the target, a static pull can
+			// stop short there and get zeroed at the wrong position - confirmed directly via the M569 D4
+			// reply diagnostic below, which showed repeated ~40-90 degree shortfalls on a fixed-angle pull
+			// commanded 180 degrees away. This sweep instead mirrors assistedOpen mode (ClosedLoop.cpp,
+			// ClosedLoopMode::assistedOpen), which has proven reliable at crossing the same problem region:
+			// a continuously-advancing field angle drags the rotor along behind it rather than asking a
+			// single static pull to already be strong enough to jump straight past any detent in one go.
+			// Sweeping a full 360 electrical degrees (rather than just the direct distance to the target)
+			// guarantees the rotor is dragged all the way around and past every detent at least once,
+			// regardless of its unknown starting position, before settling precisely at alignTargetAngle.
+			constexpr StepTimer::Ticks sweepDurationTicks = (StepTimer::StepClockRate * 5) / 10;	// 500 ms
+			constexpr StepTimer::Ticks holdDurationTicks = (StepTimer::StepClockRate * 2) / 10;	// 200 ms settle at the final target
+			while (true)
+			{
+				const StepTimer::Ticks elapsed = (StepTimer::Ticks)(StepTimer::GetTimerTicks() - alignStart);
+				if (elapsed >= sweepDurationTicks + holdDurationTicks) { break; }
+				uint16_t sweepAngle;
+				if (elapsed < sweepDurationTicks)
+				{
+					// Linear ramp: 0 -> 4096 (one full electrical revolution) over sweepDurationTicks,
+					// then offset so the sweep always ENDS exactly at alignTargetAngle.
+					const uint32_t sweepProgress = ((uint32_t)elapsed * 4096u) / sweepDurationTicks;
+					sweepAngle = (uint16_t)((sweepProgress + alignTargetAngle) & 4095u);
+				}
+				else
+				{
+					sweepAngle = alignTargetAngle;		// final hold, same as the old fixed-angle dwell
+				}
+				focController->ApplyTorque(alignTorque, sweepAngle);
+				delay(1);
+			}
+
+			// Zero the encoder at the settled position and re-synchronise the target atomically.
+			// This must all happen inside one critical section: the periodic control-loop task
+			// reads/writes this same state (encoder count, target) on every ~80us tick regardless
+			// of currentMode, so without the lock it can observe a torn combination of a freshly
+			// zeroed encoder paired with a stale, not-yet-resynchronised target - producing a large
+			// phantom position error that the PID then reacts to at full authority.
+			int32_t settledCount;
+			{
+				TaskCriticalSectionLocker lock;
+				encoder->TakeReading();		// refresh currentCount one last time before we zero it, so we can measure how far the pull actually moved the rotor
+				settledCount = encoder->GetCurrentCount();
+				encoder->Enable();				// zeroes the hardware counter and the cached currentCount at the settled position
+				encoder->TakeReading();		// flush stale currentCount; Enable() zeroed hardware but not the cached count
+				SetTargetToCurrentPosition();
+				PIDITerm = 0.0f;
+				errorDerivativeFilter.Reset();
+				speedFilter.Reset();
+				inTorqueMode = false;
+				stall = false;					// explicitly clear any latched stall condition, same as ResetError()
+				preStall = false;
+				focAppliedTorque = 0.0f;			// start the continuous torque slew limiter from zero, so it also covers the immediate post-alignment period
+				focAlignmentDone = true;
+			}
+
+			// Sanity-check that the pull actually moved the rotor a plausible amount. Too little
+			// motion suggests the driver/motor isn't actually energised (e.g. a fault or wiring
+			// issue); too much suggests the encoder count/CPR or pole pair count is misconfigured.
+			// Report the same way other tuning/calibration failures are reported, which also blocks
+			// InstanceControlLoop() from running ControlMotorCurrents() until it is cleared.
+			const int32_t alignmentMotionCounts = labs(settledCount - preAlignCount);
+			constexpr int32_t MinPlausibleAlignmentCounts = 4;			// a few encoder counts at least
+			const int32_t maxPlausibleAlignmentCounts = (int32_t)(encoder->GetCountsPerStep() * (float)encoder->GetStepsPerRev());	// one full mechanical revolution
+			if (alignmentMotionCounts < MinPlausibleAlignmentCounts)
+			{
+				tuningError = (tuningError & ~TuningError::TooMuchMotion) | TuningError::TooLittleMotion;
+			}
+			else if (alignmentMotionCounts > maxPlausibleAlignmentCounts)
+			{
+				tuningError = (tuningError & ~TuningError::TooLittleMotion) | TuningError::TooMuchMotion;
+			}
+			else
+			{
+				tuningError &= ~(TuningError::TooLittleMotion | TuningError::TooMuchMotion);
+			}
+
+			// Report the raw settled displacement in encoder counts and electrical degrees. Kept from the
+			// diagnostic added while investigating the old fixed-angle-pull approach, which showed
+			// repeated, systematic 40-90 degree shortfalls when the target was far from the rotor's start
+			// (e.g. commanded 180 degrees away, consistently settled around 90-143 degrees instead) - this
+			// is what motivated switching to the full-revolution sweep above. Still useful going forward to
+			// confirm the sweep is reliably reaching alignTargetAngle rather than falling short like the
+			// old approach did.
+			{
+				const uint32_t countsPerElecRevForReport = (uint32_t)((encoder->GetCountsPerStep() * (float)encoder->GetStepsPerRev()) / (float)polePairCount);
+				const float achievedElecDeg = (countsPerElecRevForReport > 0)
+					? ((float)alignmentMotionCounts * 360.0f / (float)countsPerElecRevForReport) : 0.0f;
+				reply.lcatf("Alignment: settled displacement %" PRIi32 " counts (%.1f deg)",
+					alignmentMotionCounts, (double)achievedElecDeg);
+			}
+
+			// Electrical-zero offset: DISABLED as of the Svpwm() correctness fix (see FocController.cpp -
+			// Svpwm() previously had a genuine discontinuity bug, independent of alignment/calibration,
+			// that produced scrambled phase output at six fixed electrical angles per revolution). Once
+			// that was fixed, hardware testing showed the alignment dwell's angle=0 reference is ALREADY
+			// correctly q-axis-aligned with no correction needed - confirmed by comparing many alignment
+			// runs: whenever the sweep below happened to pick offset=0, the drive settled quietly with a
+			// few counts of error (correct); whenever it picked a WRONG 90-degree-multiple offset instead
+			// (which it did roughly half the time - the "largest displacement" heuristic is not reliably
+			// distinguishing true q-axis from adjacent candidates, particularly under cogging/friction),
+			// the drive ran away to a large, sustained, non-zero holding error immediately after
+			// alignment (~130-140 counts, with zero commanded target) - i.e. the sweep was actively
+			// choosing a WRONG offset a large fraction of the time, making alignment a coin flip. Rather
+			// than a live-torque-response heuristic (which this and an even earlier version both proved
+			// unreliable - see the retained-but-disabled code below), just trust the alignment dwell
+			// directly, matching SimpleFOC's alignSensor() approach, which has no separate q-axis
+			// verification step at all.
+			// TEMPORARY DIAGNOSTIC: apply a fixed test offset (in electrical degrees) to every
+			// commutation angle computed after alignment, to test whether the "magic 300"-style stall
+			// location is tied to a specific ELECTRICAL angle (in which case it should shift by roughly
+			// the same amount, in encoder counts, as this offset does) or to something else entirely.
+			// This is independent of the alignment sweep/C-value confound found earlier (changing C
+			// alters how much of one electrical revolution the fixed-duration alignment sweep covers,
+			// entangling the alignment outcome with C itself) - this offset is applied AFTER alignment
+			// completes, on top of whatever electrical zero the sweep already settled at, so it cleanly
+			// isolates just the commutation angle without touching alignment behaviour at all.
+			// Edit focTestOffsetDegrees and reflash between trials (e.g. 0, 15, 30, 45...).
+			//
+			// Applying the offset in a single step was found to make the rotor snap hard toward the new
+			// reference angle (the rotor is still physically sitting at the OLD zero when the offset first
+			// takes effect, so the commanded field suddenly points focTestOffsetDegrees away from the
+			// rotor's actual position) - hard/fast enough to trip the driver's overcurrent fault before the
+			// intended region-crossing test even starts. Ramp the offset in smoothly instead, same style
+			// as the alignment sweep above, so the rotor eases to the new reference angle under control.
+			constexpr float focTestOffsetDegrees = 0.0f;
+			const uint16_t focTestOffsetTarget = (uint16_t)(lrintf((focTestOffsetDegrees / 360.0f) * 4096.0f) & 4095);
+			if (focTestOffsetTarget != 0)
+			{
+				// Kept short deliberately: the alignment sweep above already uses 700ms of the ~900ms
+				// total budget before M569 D4/M569.1 risks a CAN response timeout on the main board (see
+				// the NB comment further up) - 100ms is enough to avoid an instantaneous step (the
+				// original problem) without pushing the combined sequence close to that ceiling.
+				constexpr StepTimer::Ticks offsetRampTicks = StepTimer::StepClockRate / 10;	// 100 ms
+				const StepTimer::Ticks offsetRampStart = StepTimer::GetTimerTicks();
+				while (true)
+				{
+					const StepTimer::Ticks elapsed = (StepTimer::Ticks)(StepTimer::GetTimerTicks() - offsetRampStart);
+					if (elapsed >= offsetRampTicks) { break; }
+					const uint16_t rampedOffset = (uint16_t)(((uint32_t)focTestOffsetTarget * elapsed) / offsetRampTicks);
+					focElectricalAngleOffset = rampedOffset;
+					// Re-derive electricalAngle from the live (still ~stationary) encoder count each tick,
+					// same formula as the main control loop, so the commanded field advances smoothly
+					// alongside the ramping offset rather than jumping straight to the final value.
+					const uint32_t countsPerElecRevForRamp = (uint32_t)((encoder->GetCountsPerStep() * (float)encoder->GetStepsPerRev()) / (float)polePairCount);
+					uint16_t rampAngle = rampedOffset;
+					if (countsPerElecRevForRamp > 0)
+					{
+						encoder->TakeReading();
+						int32_t remainder = encoder->GetCurrentCount() % (int32_t)countsPerElecRevForRamp;
+						if (remainder < 0) { remainder += (int32_t)countsPerElecRevForRamp; }
+						rampAngle = (uint16_t)((((uint32_t)remainder * 4096u) / countsPerElecRevForRamp + rampedOffset) & 4095u);
+					}
+					focController->ApplyTorque(alignTorque, rampAngle);
+					delay(1);
+				}
+			}
+			focElectricalAngleOffset = focTestOffsetTarget;
+#if 0	// retained for reference; disabled - see comment above for why this proved unreliable in practice
+			if ((tuningError & (TuningError::TooLittleMotion | TuningError::TooMuchMotion)) == 0)
+			{
+				const uint32_t countsPerElecRev = (uint32_t)((encoder->GetCountsPerStep() * (float)encoder->GetStepsPerRev()) / (float)polePairCount);
+				if (countsPerElecRev > 0)
+				{
+					// Test four candidate offsets 90 electrical degrees apart (0, 90, 180, 270) - true
+					// q-axis should be the one that produces the largest SUSTAINED live-commutated
+					// rotation, and its sign tells us which of the two 90-degree candidates is q rather
+					// than -q. Each test runs long enough to distinguish "keeps turning" from "moved a
+					// little and stopped" (the latter being what a wrong-angle/d-axis-biased candidate,
+					// or pure cogging response, looks like).
+					constexpr uint16_t testOffsets[4] = { 0u, 1024u, 2048u, 3072u };
+					constexpr StepTimer::Ticks candidateTestTicks = StepTimer::StepClockRate / 10;	// 100 ms per candidate
+					int32_t bestDisplacement = 0;
+					uint16_t bestOffset = 0;
+					for (uint16_t candidateOffset : testOffsets)
+					{
+						encoder->TakeReading();
+						const int32_t beforeCount = encoder->GetCurrentCount();
+						const StepTimer::Ticks testStart = StepTimer::GetTimerTicks();
+						while ((StepTimer::Ticks)(StepTimer::GetTimerTicks() - testStart) < candidateTestTicks)
+						{
+							encoder->TakeReading();
+							const int32_t liveCount = encoder->GetCurrentCount();
+							int32_t remainder = liveCount % (int32_t)countsPerElecRev;
+							if (remainder < 0) { remainder += (int32_t)countsPerElecRev; }
+							const uint16_t liveAngle = (uint16_t)((((uint32_t)remainder * 4096u) / countsPerElecRev + candidateOffset) & 4095u);
+							focController->ApplyTorque(alignTorque, liveAngle);
+							delay(1);
+						}
+						encoder->TakeReading();
+						const int32_t afterCount = encoder->GetCurrentCount();
+						const int32_t displacement = afterCount - beforeCount;
+						if (labs(displacement) > labs(bestDisplacement))
+						{
+							bestDisplacement = displacement;
+							bestOffset = candidateOffset;
+						}
+						// Let the rotor settle towards zero torque briefly before the next candidate, so
+						// each test starts from a similar state rather than compounding drift.
+						focController->ApplyTorque(0.0f, 0u);
+						delay(15);
+					}
+
+					// If the best candidate produced a displacement in the "wrong" rotational sense for a
+					// positive torqueMagnitude (i.e. negative), the true q-axis is 180 degrees from it -
+					// correct for that so a positive torqueMagnitude in normal running always corresponds
+					// to a positive (forward) rotor displacement, matching the sign convention the rest of
+					// the control loop (and its direction multiplier) already assumes.
+					if (bestDisplacement < 0)
+					{
+						bestOffset = (uint16_t)((bestOffset + 2048u) & 4095u);
+					}
+					focElectricalAngleOffset = bestOffset;
+
+					// Pull back to electrical angle 0 (NOT bestOffset) using the ORIGINAL zero established
+					// above, since the runtime commutation formula already adds focElectricalAngleOffset on
+					// top of the encoder-zero established there - re-zeroing at bestOffset here would cause
+					// that offset to be applied twice. This just resettles the rotor and re-syncs the target
+					// after the verification pulses displaced it, without changing what "encoder count 0"
+					// means.
+					// NOTE: alignDwellTicks no longer exists (replaced by the sweepDurationTicks/
+					// holdDurationTicks pair above when the fixed-angle dwell was replaced with a
+					// full-revolution sweep) - this whole block is disabled (#if 0) and was already
+					// unreliable before that change (see the comment above this #if 0), so it hasn't
+					// been updated to match. Fix this reference if ever re-enabling this block.
+					const StepTimer::Ticks resettleStart = StepTimer::GetTimerTicks();
+					while ((StepTimer::Ticks)(StepTimer::GetTimerTicks() - resettleStart) < alignDwellTicks)
+					{
+						focController->ApplyTorque(alignTorque, 0u);
+						delay(1);
+					}
+					{
+						TaskCriticalSectionLocker lock;
+						encoder->TakeReading();
+						encoder->Enable();
+						encoder->TakeReading();
+						SetTargetToCurrentPosition();
+						PIDITerm = 0.0f;
+						errorDerivativeFilter.Reset();
+						speedFilter.Reset();
+						focAppliedTorque = 0.0f;
+					}
+				}
+			}
+#endif	// #if 0 - disabled q-axis verification sweep
+		}
+#endif
 	}
 
 	// If we are disabling closed loop mode, we should ideally send steps to get the microstep counter to match the current phase here
 #if SUPPORT_FOC
-	if (mode == ClosedLoopMode::open) { focAlignmentDone = false; }
+	if (mode == ClosedLoopMode::open) { focAlignmentDone = false; focAppliedTorque = 0.0f; }
 #endif
 	currentMode = mode;
 
@@ -1896,6 +2518,25 @@ void ClosedLoop::ApplyFocTorque(float torqueMagnitude, uint16_t electricalAngle)
 	{
 		focController->ApplyTorque(torqueMagnitude, electricalAngle);
 	}
+}
+
+float ClosedLoop::GetFocVoltageScale() const noexcept
+{
+	return (focSupplyVoltage > 0.0f && focVoltageLimit > 0.0f) ? constrain<float>(focVoltageLimit / focSupplyVoltage, 0.0f, 1.0f) : 1.0f;
+}
+
+// External gate-driver nFAULT diagnostic input (see FocDriverFaultPin, board config). Not board-standard
+// hardware - the SimpleFOCMini's DRV8313 has an open-drain, active-low nFAULT pin with no SPI/register
+// interface (unlike the DRV8316 handled via drv8316PollFaults() elsewhere), so this gives the only way to
+// see a fault from firmware at all; wire nFAULT to this pin externally when debugging.
+/*static*/ void ClosedLoop::InitFocDriverFaultPin() noexcept
+{
+	SetPinMode(FocDriverFaultPin, INPUT_PULLUP);		// open-drain output on the driver side needs a pullup to read a clean high when not faulted
+}
+
+/*static*/ bool ClosedLoop::ReadFocDriverFault() noexcept
+{
+	return !digitalRead(FocDriverFaultPin);							// active low: pin reads LOW when a fault is asserted
 }
 #endif
 

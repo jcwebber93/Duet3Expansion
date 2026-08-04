@@ -24,6 +24,9 @@
 # if SUPPORT_FOC
 #  include "FocController.h"
 # endif
+# if SUPPORT_DRV8316_SPI
+#  include "DRV8316.h"
+# endif
 
 constexpr float MaxSafeBacklash = 0.22;					// the maximum backlash in full steps that we can use - error if there is more
 constexpr float MaxGoodBacklash = 0.15;					// the maximum backlash in full steps that we are happy with - warn if there is more
@@ -90,6 +93,15 @@ public:
 	}
 
 	bool IsDcServoMode() const noexcept { return isDcServoMode; }
+
+#if SUPPORT_FOC
+	// True for a BLDC/FOC-controlled drive. Like DC servo, this drive's currentMotorPosition/target
+	// bookkeeping is physical and direction-independent (electrical commutation angle is derived
+	// straight from live encoder position, not from accumulated direction-signed step count), so it
+	// must NOT be inverted on an S0/S1 direction change the way a classic stepper's step count is -
+	// see Move::SetDirectionValue().
+	bool IsFocMode() const noexcept { return motorType == EncoderType::bldc || motorType == EncoderType::stepperFoc || motorType == EncoderType::hybridStepperFoc; }
+#endif
 
 	void InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks timeElapsed) noexcept;
 	StandardDriverStatus ReadLiveStatus() const noexcept;
@@ -180,7 +192,83 @@ private:
 	uint8_t polePairCount = 1;									// Number of electrical pole pairs (M569.1 L parameter)
 	EncoderType motorType = EncoderType::none;					// The configured motor type (T param); separate from encoder->GetType() which reflects the sensor
 	bool focAlignmentDone = false;								// true once the startup alignment dwell has completed
-	StepTimer::Ticks focAlignStartTick = 0;						// tick when the alignment dwell began
+	float focMaxTorque = 1.0f;									// Peak torque fraction [0.0, 1.0] applied to FOC output (M569.1 W parameter)
+	float focMultiplier = 1.0f;									// +1 or -1 per S0/S1 direction setting; persisted so CollectSample can convert logical→physical space
+
+	// Voltage scaling: torqueMagnitude (a [-1,1] fraction) is otherwise applied directly as a duty-cycle
+	// fraction of the FULL supply voltage (see FocController::ApplyTorque), unlike SimpleFOC's explicit
+	// voltage_limit/voltage_power_supply split. When both are configured (M569.1 N = supply volts,
+	// O = voltage limit in volts), torqueMagnitude is scaled by focVoltageLimit/focSupplyVoltage before
+	// being sent to the driver, so W/running torque and the alignment pull can be expressed in real,
+	// predictable volts instead of an opaque 0..1 fraction of an unstated supply voltage. Zero means
+	// "not configured" - falls back to the pre-existing unscaled behaviour.
+	float focSupplyVoltage = 0.0f;								// nominal motor supply voltage in volts (M569.1 N parameter); 0 = not configured
+	float focVoltageLimit = 0.0f;								// FOC voltage limit in volts (M569.1 O parameter); 0 = not configured
+
+	// Velocity ceiling for the outer position loop's vel_target (PIDJTerm+PIDVTerm+PIDATerm), mirroring
+	// SimpleFOC's P_angle.limit/velocity_limit (see FOCMotor.cpp: shaft_velocity_sp is constrained to
+	// +-velocity_limit immediately, every call). Without this, vel_target - dominated by the unbounded
+	// Kpp*currentPositionError term - only grows as large as the accumulated position error, so a stalled
+	// rotor only receives a strong torque demand well AFTER a large error has built up, rather than an
+	// immediate, decisive one from the first tick. Confirmed directly: a SimpleFOC capture on the same
+	// motor/driver showed vel_target saturating to its limit instantly on a large step, while the
+	// Duet3Expansion equivalent (PIDJTerm) climbed smoothly over ~140ms before reaching a comparable
+	// magnitude - matching the "torque ramps up, then faults" pattern seen in every reproduced stall.
+	// Repurposes M569.1 Q (torquePerAmp), which has no effect on FOC/BLDC drives (only meaningful for
+	// SUPPORT_TMC51xx torque-mode current scaling - see ControlMotorCurrents()'s torque-mode branch).
+	// Units: steps/second (converted internally to the steps-per-step-clock-tick units vel_target/
+	// vel_measured actually use). 0 = not configured, falls back to the pre-existing unclamped behaviour.
+	float focVelocityLimit = 0.0f;								// M569.1 Q parameter (FOC drives only), steps/sec; 0 = not configured
+
+	// Continuous slew-rate limit on commanded torque, applied every control tick (not just after
+	// alignment). Bounds how fast torqueMagnitude can change in torque-fraction-per-second, which in
+	// turn bounds phase current di/dt regardless of how large the raw PID output jumps (e.g. from a
+	// sudden hand-induced position error). This mirrors SimpleFOC's PID output_ramp (volts/sec on Uq),
+	// which is the mechanism that let the same DRV8313 driver run fault-free under SimpleFOC even with
+	// comparably aggressive manual disturbances - the port previously had no equivalent, only a fixed
+	// magnitude clamp (focMaxTorque) that let torqueMagnitude jump to full scale within a single ~80us
+	// control tick.
+	// Disabled by default: measured against real closed-loop logs, this rate (4.0 = 0..1.0 in 250ms) made
+	// torqueMagnitude climb far too slowly to reach breakaway torque from a dead stop before the target
+	// had already moved further away, causing motion to reliably stall after a few hundred encoder counts
+	// - a symptom absent in both open-loop (assistedOpen, which applies a constant unramped magnitude) and
+	// in the SimpleFOC reference config (whose own output_ramp equivalent, when used at all, is ~20x less
+	// restrictive and off by default). Left in place and re-enable-able via focTorqueRampEnabled in case a
+	// slew limit is wanted again for fault mitigation, but it must not be on by default.
+	static constexpr float focTorqueRampRate = 4.0f;				// max change in torque fraction per second (~4.0 = 0..1.0 in 250ms), only used if focTorqueRampEnabled
+	bool focTorqueRampEnabled = false;							// gate for the torque slew-rate limiter; off by default, see comment above
+	float focAppliedTorque = 0.0f;								// last torque fraction actually sent to ApplyFocTorque(), for slew-limiting the next call
+
+	// Electrical-zero verification/correction. The alignment dwell establishes electricalAngle=0 by
+	// re-zeroing the encoder at wherever the rotor settles under a fixed-angle-0 pull - this makes the
+	// angle formula self-consistent (encoderCount=0 maps to electricalAngle=0) but never confirms that
+	// commanding a PURE q-axis torque (90 electrical degrees from that zero) actually produces a
+	// torque-maximising, rotor-turning vector rather than one that's rotated towards the (non-torque-
+	// producing) d-axis by some fixed error - which SimpleFOC's independent zero_electric_angle
+	// calibration (drive to a KNOWN angle, read back the sensor) avoids by construction. If the
+	// verification pulse below finds a mismatch, this stores an additive correction so electricalAngle
+	// values used for commutation are shifted to genuinely align q-axis commands with the rotor's D-axis.
+	uint16_t focElectricalAngleOffset = 0;						// additive correction (0..4095) applied to all commutation angles after alignment
+
+	// Debug snapshot of the last electricalAngle/torqueMagnitude actually passed to ApplyFocTorque(),
+	// for M122 diagnostics - lets us see the raw inputs to the SVPWM output stage directly instead of
+	// inferring them from PIDControlSignal/duty cycle.
+	uint16_t lastFocElectricalAngle = 0;
+	float lastFocTorqueMagnitude = 0.0f;
+	float lastFocVelTargetRaw = 0.0f;							// TEMPORARY DEBUG: raw vel_target before the focVelocityLimit clamp, for diagnosing the Q4000 zero-torque issue - remove once resolved
+
+	// Live external gate-driver nFAULT pin state (see FocDriverFaultPin, board config), sampled every
+	// control tick and logged via CollectSample() so a fault event (e.g. the SimpleFOCMini's DRV8313
+	// tripping OCP) can be correlated directly against the exact sample/torque/angle it occurred at,
+	// rather than inferred after the fact from a full power-cycle being needed to recover. true = fault
+	// pin currently reads active (driver is faulted); the pin is open-drain active-low, so this already
+	// accounts for the inversion (see InitFocDriverFaultPin()/ReadFocDriverFault() in ClosedLoop.cpp).
+	bool lastFocDriverFault = false;
+#endif
+
+#if SUPPORT_DRV8316_SPI
+	DRV8316 *drv8316 = nullptr;
+	uint8_t drv8316PollCounter = 0;								// incremented each control tick; faults polled every 125 ticks (~10 ms)
 #endif
 
 	float 	errorThresholds[2];									// The error thresholds. [0] is pre-stall, [1] is stall
@@ -276,6 +364,13 @@ private:
 
 #if SUPPORT_FOC
 	void ApplyFocTorque(float torqueMagnitude, uint16_t electricalAngle) noexcept;
+
+	// Returns the multiplier to apply to a torque-fraction command to respect focVoltageLimit/focSupplyVoltage,
+	// or 1.0 (no scaling) if either is not configured (0.0). Defined in ClosedLoop.cpp.
+	float GetFocVoltageScale() const noexcept;
+
+	static void InitFocDriverFaultPin() noexcept;					// one-time GPIO setup for FocDriverFaultPin
+	static bool ReadFocDriverFault() noexcept;						// true if the external gate driver's nFAULT is currently asserted
 #endif
 
 	bool BasicTuning(bool firstIteration) noexcept;

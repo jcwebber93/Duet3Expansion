@@ -75,7 +75,7 @@ static Task<MoveTaskStackWords> *moveTask;
 
 constexpr uint32_t ClosedLoopSleepClocks = (StepTimer::StepClockRate * 80) / 1000000;	// 80µs at 750kHz step clock
 
-static Task<200> closedLoopTask;
+static Task<300> closedLoopTask;
 static StepTimer closedLoopTimer;
 static uint32_t clLastWakeupTime;
 
@@ -1388,14 +1388,37 @@ void Move::SetDirectionValue(size_t drive, bool dVal) noexcept
 		{
 			TaskCriticalSectionLocker lock;
 			directions[drive] = dVal;
-#if SUPPORT_DCSERVO
-			// For DC servo, direction controls how incoming CAN steps are signed (handled in AddLinearSegments).
-			// currentMotorPosition is in physical units and must NOT be inverted on a direction change.
-			if (!dms[drive].IsDcServo())
+#if SUPPORT_DCSERVO || SUPPORT_FOC
+			// For DC servo AND FOC/BLDC, direction is applied as a sign multiplier at the point of use
+			// (see the `multiplier` computed from GetDirectionValueNoCheck() in ClosedLoop.cpp), not by
+			// inverting the accumulated position itself. currentMotorPosition/distanceCarriedForwards
+			// are physical, direction-independent units for both of these drive types (see
+			// GetTargetMotorStepsPhysical()'s doc comment) and must NOT be inverted here - doing so would
+			// silently corrupt the target position bookkeeping on every S0/S1 toggle.
+			if (!dms[drive].IsDcServo() && !dms[drive].IsFoc())
 #endif
 			{
 				InvertCurrentMotorSteps(drive);
 			}
+#if SUPPORT_FOC
+			else if (dms[drive].IsFoc() && dms[drive].closedLoopControl.IsClosedLoopEnabled())
+			{
+				// mParams.position (the FOC target) is stored in a direction-agnostic convention that is
+				// only meaningful relative to the `multiplier` in effect when it was last set (see
+				// ControlMotorCurrents()/SetTargetToCurrentPosition() in ClosedLoop.cpp) - it is NOT
+				// re-signed here just because directions[drive] changed above. Without this resync, the
+				// very next control tick recomputes targetPhysicalCount using the NEW multiplier against
+				// the OLD mParams.position, producing a large phantom position error out of nowhere (with
+				// no move even queued) - confirmed directly from a log where a bare M569 Sx direction
+				// change, issued while idle, immediately tripped the driver's overcurrent fault.
+				// ResetError() (public) resyncs the target to the current encoder position - the same
+				// operation SetTargetToCurrentPosition() (private) performs at the start of a new move -
+				// plus clears filter/stall state, which is appropriate here too. TaskCriticalSectionLocker
+				// is nestable (FreeRTOS tracks nesting via vTaskSuspendAll()), so calling it from within
+				// the lock already held above is safe.
+				dms[drive].closedLoopControl.ResetError();
+			}
+#endif
 		}
 #else
 		directions[drive] = dVal;

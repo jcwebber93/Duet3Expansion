@@ -39,26 +39,25 @@
 #define SUPPORT_TMC2240_SPI		0
 
 #define SUPPORT_MT6835			0
-#define ACTIVE_HIGH_STEP		1
-#define ACTIVE_HIGH_DIR			1
+#define ACTIVE_HIGH_STEP		0
 #define ACTIVE_HIGH_ENABLE		0	// active-low (standard for DRV8825, TMC standalone, etc.)
-#define SUPPORT_FOC				0
+#define SUPPORT_FOC				1
 #define SUPPORT_FOC_STEPPER		0
+#define SUPPORT_DRV8316_SPI		1
 #define SUPPORT_MT6835					0
 #define SUPPORT_QUADRATURE_ENCODER		1
 #define SUPPORT_COMPOSITE_ENCODER		0
 
 // DMA channel assignments
-constexpr DmaChannel DmacChanTmcTx = 0;
-constexpr DmaChannel DmacChanTmcRx = 1;
-constexpr DmaChannel DmacChanAdc0Rx = 2;
-constexpr DmaChannel DmacChanLedTx = 5;
-constexpr DmaChannel DmacChanSspiTx = 3;
-constexpr DmaChannel DmacChanSspiRx = 4;
+constexpr DmaChannel DmacChanAdc0Rx = 0;
+constexpr DmaChannel DmacChanLedTx = 3;
+constexpr DmaChannel DmacChanSspiTx = 1;
+constexpr DmaChannel DmacChanSspiRx = 2;
+constexpr DmaChannel DmacChanDrv8316Tx = 4;
+constexpr DmaChannel DmacChanDrv8316Rx = 5;
 constexpr unsigned int NumDmaChannelsUsed = 6;
 
-constexpr DmaPriority DmacPrioTmcTx = 0;
-constexpr DmaPriority DmacPrioTmcRx = 3;
+
 constexpr DmaPriority DmacPrioAdcRx = 2;
 constexpr DmaPriority DmacPrioLed = 1;
 constexpr DmaPriority DmacPrioSspiTx = 0;
@@ -74,11 +73,11 @@ const NvicPriority NvicPriorityCan  = 4;
 const NvicPriority NvicPriorityAdc  = 5;
 
 constexpr size_t NumDrivers = 1;
+constexpr float MaxMotorCurrent = 1000.0;
 
-PortGroup * const StepPio = &(PORT->Group[0]);
-constexpr Pin StepPins[NumDrivers]      = { PortAPin(9) };
-constexpr Pin DirectionPins[NumDrivers] = { PortAPin(10) };
-constexpr Pin EnablePins[NumDrivers]    = { PortAPin(11) };
+#define ACTIVE_HIGH_DIR		1
+
+// No physical stepper driver is fitted — SUPPORT_DRIVERS 1 is required for DC servo (Move class).
 
 #define SUPPORT_THERMISTORS		1
 #define SUPPORT_SPI_SENSORS		0
@@ -143,23 +142,71 @@ constexpr SpiParameters SharedSpiParams =
 // Encoder CS pin (used to deselect SPI encoders at startup, even when using PDEC)
 constexpr Pin EncoderCsPin = PortAPin(18);
 
-// Position decoder
+// Position decoder (PDEC): PA24=QDI0 (A), PA25=QDI1 (B), PB22=QDI2 (index)
 constexpr Pin PositionDecoderPins[] = { PortAPin(24), PortAPin(25), PortBPin(22) };
 constexpr GpioPinFunction PositionDecoderPinFunction = GpioPinFunction::G;
 
-#if SUPPORT_DCSERVO
+#if SUPPORT_FOC
+// FOC three-phase PWM outputs — all on TCC0, Mux F, synchronized to one counter
+// PA08 → TCC0/WO[0] (Mux F): phase W (motor phase sequence requires U on PA10, W on PA08)
+// PA09 → TCC0/WO[1] (Mux F): phase V
+// PA10 → TCC0/WO[2] (Mux F): phase U
+constexpr Pin FocPhaseUPin = PortAPin(10);  // U on PA10
+constexpr Pin FocPhaseVPin = PortAPin(9);   // V on PA09 unchanged
+constexpr Pin FocPhaseWPin = PortAPin(8);   // W on PA08
+constexpr GpioPinFunction FocPhaseUFn = GpioPinFunction::F;
+constexpr GpioPinFunction FocPhaseVFn = GpioPinFunction::F;
+constexpr GpioPinFunction FocPhaseWFn = GpioPinFunction::F;
+constexpr PwmFrequency FocPwmFrequency = 20000;
+// SUPPORT_DCSERVO=1 is required to suppress stepper-driver pin requirements in Move.h.
+// This board has no DC servo H-bridge; these are NoPin stubs so InitDcPwm/SetDcPwm compile.
+constexpr Pin DcServoFwdPin = NoPin;
+constexpr Pin DcServoRevPin = NoPin;
+#elif SUPPORT_DCSERVO
 // DC servo PWM — two independent TCCs for independent frequency control
-// PA13 -> TCC1_WO3 (Mux G, tcc1_3G): servo forward / H-bridge IN A
-// PA20 -> TCC0_WO0 (Mux G, tcc0_0G): servo reverse / H-bridge IN B
-// TCC0 and TCC1 are fully consumed by these two pins; no other TCC0/TCC1 in pin table.
-constexpr Pin DcServoFwdPin = PortAPin(13);		// io_fwd
-constexpr Pin DcServoRevPin = PortAPin(20);		// io_rev
+// PA13 -> TCC1_WO3 (Mux G): servo forward / H-bridge IN A
+// PA20 -> TCC0_WO0 (Mux G): servo reverse / H-bridge IN B
+constexpr Pin DcServoFwdPin = PortAPin(20);		// io_fwd
+constexpr Pin DcServoRevPin = PortAPin(13);		// io_rev
 #endif
 
 // SERCOM pin assignments used in pin table
 constexpr auto Sercom0dPad0 = SercomIo::sercom0d + SercomIo::pad0;
 constexpr auto Sercom0dPad1 = SercomIo::sercom0d + SercomIo::pad1;
 constexpr auto Sercom5dPad0 = SercomIo::sercom5d + SercomIo::pad0;	// PB02 NeoPixel data out
+#if SUPPORT_DRV8316_SPI
+constexpr auto Sercom4dPad0 = SercomIo::sercom4d + SercomIo::pad0;	// PB08 DRV8316 MOSI
+constexpr auto Sercom4dPad1 = SercomIo::sercom4d + SercomIo::pad1;	// PB09 DRV8316 SCK
+constexpr auto Sercom4dPad3 = SercomIo::sercom4d + SercomIo::pad3;	// PB11 DRV8316 MISO
+#endif
+
+#if SUPPORT_DRV8316_SPI
+// DRV8316 SPI on SERCOM4 (PB08=MOSI pad0, PB09=SCK pad1, PB11=MISO pad3, PB10=nSCS GPIO)
+// All on Mux D. SERCOM4 is otherwise unused on SAME51G19A.
+constexpr SpiParameters Drv8316SpiParams =
+{
+	.sercomNumber = 4,
+	.mosiPin      = PortBPin(8),
+	.misoPin      = PortBPin(11),
+	.sclkPin      = PortBPin(9),
+	.pinFunction  = GpioPinFunction::D,
+	.dataInPad    = 3,
+	.dataOutPad   = 0,
+	.dmaChanTx    = DmacChanDrv8316Tx,
+	.dmaChanRx    = DmacChanDrv8316Rx,
+	.dmaPrioTx    = DmacPrioSspiTx,
+	.dmaPrioRx    = DmacPrioSspiRx,
+};
+constexpr Pin Drv8316CsPin = PortBPin(10);
+#endif
+
+#if SUPPORT_FOC
+// nFAULT from an external 3-phase gate driver (e.g. the SimpleFOCMini's DRV8313, which - unlike the
+// DRV8316 above - has no SPI fault interface, only an open-drain active-low nFAULT pin) wired to a free
+// GPIO for diagnostic purposes. Not board-standard hardware; wire nFAULT to this pin externally when
+// debugging a driver fault that the DRV8316 SPI path (if even present/populated) cannot see.
+constexpr Pin FocDriverFaultPin = PortAPin(2);		// PA02 - general-purpose GPIO, otherwise unused (see PinTable)
+#endif
 
 
 // Table of pin functions that we are allowed to use
@@ -174,17 +221,25 @@ constexpr PinDescription PinTable[] =
 	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_4,	SercomIo::none,		Sercom0dPad0,		4,		"pa04"			},	// PA04 UART TX (SERCOM0 Mux D pad 0)
 	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_5,	Sercom0dPad1,		SercomIo::none,		5,		"pa05"			},	// PA05 UART RX (SERCOM0 Mux D pad 1)
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa06"			},	// PA06
-	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		7,		"pa07"			},	// PA07
-	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_8,	SercomIo::none,		SercomIo::none,		Nx,		"pa08"			},	// PA08
-	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_9,	SercomIo::none,		SercomIo::none,		Nx,		"pa09"			},	// PA09, could be used for STEP
-	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_10,	SercomIo::none,		SercomIo::none,		Nx,		"pa10"			},	// PA10, could be used for DIR
+	{ TcOutput::tc1_1,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		7,		"pa07"			},	// PA07
+#if SUPPORT_FOC
+	{ TcOutput::none,	TccOutput::tcc0_0F,	AdcInput::adc0_8,	SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA08 FOC phase W (TCC0_WO0, Mux F) — reserved
+	{ TcOutput::none,	TccOutput::tcc0_1F,	AdcInput::adc0_9,	SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA09 FOC phase V (TCC0_WO1, Mux F) — reserved
+	{ TcOutput::none,	TccOutput::tcc0_2F,	AdcInput::adc0_10,	SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA10 FOC phase U (TCC0_WO2, Mux F) — reserved
+#else
+	{ TcOutput::none,	TccOutput::tcc0_0F,	AdcInput::adc0_8,	SercomIo::none,		SercomIo::none,		Nx,		"pa08"			},	// PA08
+	{ TcOutput::none,	TccOutput::tcc0_1F,	AdcInput::adc0_9,	SercomIo::none,		SercomIo::none,		Nx,		"pa09"			},	// PA09
+	{ TcOutput::none,	TccOutput::tcc0_2F,	AdcInput::adc0_10,	SercomIo::none,		SercomIo::none,		Nx,		"pa10"			},	// PA10
+#endif
 	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_11,	SercomIo::none,		SercomIo::none,		Nx,		"pa11"			},	// PA11, could be used for EN
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		12,		"pa12"			},	// PA12
-#if SUPPORT_DCSERVO	
+#if SUPPORT_FOC
+	{ TcOutput::none,	TccOutput::tcc1_3G,	AdcInput::none,		SercomIo::none,		SercomIo::none,		13,		nullptr			},	// PA13 FOC phase U (TCC1_WO3, Mux G) — reserved
+#elif SUPPORT_DCSERVO
 	{ TcOutput::none,	TccOutput::tcc1_3G,	AdcInput::none,		SercomIo::none,		SercomIo::none,		13,		"pa13"			},	// PA13 DC servo fwd (TCC1_WO3, Mux G)
 #else
 	{ TcOutput::none,	TccOutput::tcc1_3G,	AdcInput::none,		SercomIo::none,		SercomIo::none,		13,		"pa13"			},	// PA13
-#endif	
+#endif
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA14 XIN (crystal)
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA15 XOUT (crystal)
 #if SUPPORT_CLOSED_LOOP
@@ -198,11 +253,13 @@ constexpr PinDescription PinTable[] =
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		2,		"pa18"			},	// PA18
 	{ TcOutput::tc3_1,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa19"			},	// PA19
 #endif
-#if SUPPORT_DCSERVO		
+#if SUPPORT_FOC
+	{ TcOutput::none,	TccOutput::tcc0_0G,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA20 FOC phase V (TCC0_WO0, Mux G) — reserved
+#elif SUPPORT_DCSERVO
 	{ TcOutput::none,	TccOutput::tcc0_0G,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa20"			},	// PA20 DC servo rev (TCC0_WO0, Mux G)
 #else
 	{ TcOutput::none,	TccOutput::tcc0_0G,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa20"			},	// PA20
-#endif	
+#endif
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		"pa21"			},	// PA21
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA22 CAN0 TX
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PA23 CAN0 RX
@@ -224,10 +281,17 @@ constexpr PinDescription PinTable[] =
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB05 not on chip
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB06 not on chip
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB07 not on chip
+#if SUPPORT_DRV8316_SPI
+	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_2,	SercomIo::none,		Sercom4dPad0,		Nx,		nullptr			},	// PB08 DRV8316 MOSI (SERCOM4 Mux D pad0)
+	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_3,	SercomIo::none,		Sercom4dPad1,		Nx,		nullptr			},	// PB09 DRV8316 SCK  (SERCOM4 Mux D pad1)
+	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		10,		nullptr			},	// PB10 DRV8316 nSCS (GPIO, active low)
+	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		Sercom4dPad3,		SercomIo::none,		11,		nullptr			},	// PB11 DRV8316 MISO (SERCOM4 Mux D pad3)
+#else
 	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_2,	SercomIo::none,		SercomIo::none,		Nx,		"pb08"			},	// PB08
-	{ TcOutput::tc4_1,	TccOutput::none,	AdcInput::adc0_3,	SercomIo::none,		SercomIo::none,		Nx,		"pb09"			},	// PB09
+	{ TcOutput::none,	TccOutput::none,	AdcInput::adc0_3,	SercomIo::none,		SercomIo::none,		Nx,		"pb09"			},	// PB09 (TC4 does not exist on SAME51G19A)
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		10,		"pb10"			},	// PB10
-	{ TcOutput::tc5_1,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		11,		"pb11"			},	// PB11
+	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		11,		"pb11"			},	// PB11
+#endif
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB12 not on chip
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB13 not on chip
 	{ TcOutput::none,	TccOutput::none,	AdcInput::none,		SercomIo::none,		SercomIo::none,		Nx,		nullptr			},	// PB14 not on chip
