@@ -34,7 +34,15 @@ public:
 	bool FinishSample() noexcept;
 
 private:
-	static constexpr size_t DataBufferSize = 2000 * RoundUpToDword(MaxClosedLoopSampleLength);	// When collecting data we can accommodate 2000 samples with up to 38 bytes per sample
+	// Sized from MaxUsableClosedLoopSampleLength, not MaxClosedLoopSampleLength: a sample larger than one
+	// CAN data message can never be transmitted (M569.5 rejects such a filter), so there is no point
+	// reserving RAM for one. Without the clamp this array would grow by ~2KB for every extra byte of
+	// worst-case sample length as channels are added, and it is already the largest single allocation on
+	// the board - 2000 * 56 = 112KB of the SAME51G19A's 192KB. If RAM gets tight, reduce the sample depth
+	// here rather than dropping channels: this buffer only has to cover the backlog while samples drain
+	// over CAN, not the whole capture.
+	static constexpr size_t SampleBufferDepth = 2000;
+	static constexpr size_t DataBufferSize = SampleBufferDepth * RoundUpToDword(MaxUsableClosedLoopSampleLength);
 
 	alignas(4) uint8_t data[DataBufferSize];	// Ring buffer to store the samples in
 	size_t numBytesPerSample;

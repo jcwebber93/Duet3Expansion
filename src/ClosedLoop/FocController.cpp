@@ -6,6 +6,36 @@
 #include <RepRapFirmware.h>
 #include <AnalogOut.h>
 
+#if defined(FOC_CENTRE_ALIGNED_PWM) && FOC_CENTRE_ALIGNED_PWM
+# include <hri_tcc_e54.h>
+
+namespace
+{
+	// TCC device pointers, kept local rather than pulling in CoreN2G's Timers.h. That header is internal
+	// to CoreN2G's own build and unconditionally references TC4/TC5/TCC3/TCC4, none of which exist on the
+	// 48-pin SAME51G19A, so it does not compile from this project.
+	volatile Tcc * const FocTccDevices[] = { TCC0, TCC1, TCC2 };
+	static_assert(FocPwmTccNumber < ARRAY_SIZE(FocTccDevices));
+
+	constexpr unsigned int FocTccGclkNum = GclkNum60MHz;		// same generator CoreN2G uses for TC/TCC
+	constexpr uint32_t FocTccGclkFreq = 60000000;
+}
+
+# if FOC_PWM_EVENT_DEBUG_PIN
+// Bring-up aid - see FOC_PWM_EVENT_DEBUG_PIN in the board config for what this measures and how to read
+// it. Emits a short pulse at every TCC0 overflow, which is the instant the current-sense ADC trigger
+// fires. The pulse width is just the handler's own duration; only its position in the PWM period matters.
+static_assert(FocPwmTccNumber == 0, "the debug pulse uses TCC0_0_Handler, which is TCC0's overflow vector");
+
+extern "C" void TCC0_0_Handler() noexcept
+{
+	fastDigitalWriteHigh(FocPwmEventDebugPin);
+	TCC0->INTFLAG.reg = TCC_INTFLAG_OVF;			// clear the flag (write 1 to clear)
+	fastDigitalWriteLow(FocPwmEventDebugPin);
+}
+# endif
+#endif
+
 // 3-phase BLDC / hybrid stepper constructor
 FocController::FocController(Pin u, Pin v, Pin w,
 		GpioPinFunction uFn, GpioPinFunction vFn, GpioPinFunction wFn,
@@ -28,12 +58,102 @@ FocController::FocController(Pin in1, Pin in2, Pin in3, Pin in4,
 	(void)ena; (void)enb;	// ENA/ENB held high externally on most L298N boards
 }
 
+#if defined(FOC_CENTRE_ALIGNED_PWM) && FOC_CENTRE_ALIGNED_PWM
+
+// Set up the shared TCC for dual-slope (centre-aligned) PWM.
+//
+// This deliberately bypasses AnalogOut::Write(). AnalogWriteTcc() in CoreN2G hard-codes
+// TCC_WAVE_WAVEGEN_NPWM_Val (single slope) and is shared by every PWM consumer on the board, so it
+// cannot be switched to dual slope without affecting unrelated outputs. Centre alignment is not a
+// preference here - inline current sensing requires sampling in the middle of the window where all
+// three low-side FETs are conducting, and only a centre-aligned carrier puts that window at a fixed,
+// event-addressable point in the period.
+void FocController::InitCentreAlignedPwm() noexcept
+{
+	volatile Tcc * const tcc = FocTccDevices[FocPwmTccNumber];
+
+	EnableTccClock(FocPwmTccNumber, FocTccGclkNum);
+
+	hri_tcc_clear_CTRLA_ENABLE_bit(tcc);
+	while (tcc->SYNCBUSY.bit.ENABLE) { }
+	hri_tcc_set_CTRLA_SWRST_bit(tcc);
+	while (tcc->SYNCBUSY.bit.SWRST) { }
+
+	// In dual-slope mode the counter ramps 0 -> PER -> 0, so one carrier period is 2*PER ticks and the
+	// achievable duty resolution is PER steps. At 60 MHz GCLK and a 20 kHz carrier that is PER = 1500,
+	// comfortably inside TCC0's 24-bit counter with no prescaling.
+	pwmPeriod = FocTccGclkFreq / (2u * (uint32_t)pwmFreq);
+
+	tcc->CTRLA.bit.PRESCALER = TCC_CTRLA_PRESCALER_DIV1_Val;
+	tcc->CTRLA.bit.RESOLUTION = 0;
+
+	// DSBOTTOM: dual-slope PWM with the overflow event generated at BOTTOM. BOTTOM is the centre of the
+	// all-low-side-on window, which is exactly where Stage 3 needs to trigger the current-sense ADC.
+	hri_tcc_write_WAVE_WAVEGEN_bf(tcc, TCC_WAVE_WAVEGEN_DSBOTTOM_Val);
+
+	tcc->PER.bit.PER = pwmPeriod;
+
+	// Start all three phases at 50% - equal duty on every phase means zero differential voltage across
+	// the windings, so the motor coasts.
+	const uint32_t midpoint = pwmPeriod / 2u;
+	tcc->CC[FocPhaseUTccChannel].bit.CC = midpoint;
+	tcc->CC[FocPhaseVTccChannel].bit.CC = midpoint;
+	tcc->CC[FocPhaseWTccChannel].bit.CC = midpoint;
+
+	// Emit the overflow (BOTTOM) event for the current-sense ADC trigger. Harmless with no EVSYS
+	// consumer attached; Stage 3 routes it to the ADC.
+	tcc->EVCTRL.bit.OVFEO = 1;
+
+#if FOC_PWM_EVENT_DEBUG_PIN
+	// Mirror that same overflow to an interrupt so a GPIO pulse marks it on a scope. Deliberately set up
+	// here rather than alongside the ADC, so the trigger instant can be confirmed before any ADC code
+	// exists to be blamed for a bad reading.
+	SetPinMode(FocPwmEventDebugPin, OUTPUT_LOW);
+	tcc->INTFLAG.reg = TCC_INTFLAG_OVF;				// discard any flag set during setup
+	tcc->INTENSET.reg = TCC_INTENSET_OVF;
+	NVIC_DisableIRQ(TCC0_0_IRQn);
+	NVIC_ClearPendingIRQ(TCC0_0_IRQn);
+	NVIC_SetPriority(TCC0_0_IRQn, NvicPriorityFocPwmEventDebug);
+	NVIC_EnableIRQ(TCC0_0_IRQn);
+#endif
+
+	hri_tcc_set_CTRLA_ENABLE_bit(tcc);
+	while (tcc->SYNCBUSY.bit.ENABLE) { }
+	tcc->CTRLBSET.reg = TCC_CTRLBSET_CMD_RETRIGGER;			// without this there is a delay before PWM starts
+
+	SetPinFunction(phaseU, fnU);
+	SetPinFunction(phaseV, fnV);
+	SetPinFunction(phaseW, fnW);
+}
+
+#endif
+
+// Write the three phase duty cycles, each 0..1.
+void FocController::WritePhaseDuties(float dutyU, float dutyV, float dutyW) noexcept
+{
+#if defined(FOC_CENTRE_ALIGNED_PWM) && FOC_CENTRE_ALIGNED_PWM
+	volatile Tcc * const tcc = FocTccDevices[FocPwmTccNumber];
+	// Buffered writes: the new compare values are latched together at the period boundary, so all three
+	// phases change on the same carrier edge rather than tearing across an update.
+	const float period = (float)pwmPeriod;
+	tcc->CCBUF[FocPhaseUTccChannel].bit.CCBUF = (uint32_t)lrintf(dutyU * period);
+	tcc->CCBUF[FocPhaseVTccChannel].bit.CCBUF = (uint32_t)lrintf(dutyV * period);
+	tcc->CCBUF[FocPhaseWTccChannel].bit.CCBUF = (uint32_t)lrintf(dutyW * period);
+#else
+	AnalogOut::Write(phaseU, dutyU, pwmFreq);
+	AnalogOut::Write(phaseV, dutyV, pwmFreq);
+	AnalogOut::Write(phaseW, dutyW, pwmFreq);
+#endif
+}
+
 void FocController::Init(PwmFrequency freq) noexcept
 {
 	pwmFreq = freq;
 
 	if (outputMode == FocOutputMode::TwoPhase4Pwm)
 	{
+		// 4-pin H-bridge stepper output. The pins are not required to share a timer, so this mode always
+		// uses the shared AnalogOut path; it has no current sensing and so no need for centre alignment.
 		SetPinFunction(phaseU, fnU);	// IN1
 		SetPinFunction(phaseV, fnV);	// IN2
 		SetPinFunction(phaseW, fnW);	// IN3
@@ -44,16 +164,21 @@ void FocController::Init(PwmFrequency freq) noexcept
 		AnalogOut::Write(phaseW, 0.0f, pwmFreq);
 		AnalogOut::Write(in4Pin, 0.0f, pwmFreq);
 	}
+#if defined(FOC_CENTRE_ALIGNED_PWM) && FOC_CENTRE_ALIGNED_PWM
+	else
+	{
+		InitCentreAlignedPwm();			// also sets the pin functions and starts at 50% on all phases
+	}
+#else
 	else
 	{
 		SetPinFunction(phaseU, fnU);
 		SetPinFunction(phaseV, fnV);
 		SetPinFunction(phaseW, fnW);
 		// 50% duty = zero average voltage across all windings
-		AnalogOut::Write(phaseU, 0.5f, pwmFreq);
-		AnalogOut::Write(phaseV, 0.5f, pwmFreq);
-		AnalogOut::Write(phaseW, 0.5f, pwmFreq);
+		WritePhaseDuties(0.5f, 0.5f, 0.5f);
 	}
+#endif
 }
 
 void FocController::Coast() noexcept
@@ -67,9 +192,8 @@ void FocController::Coast() noexcept
 	}
 	else
 	{
-		AnalogOut::Write(phaseU, 0.5f, pwmFreq);
-		AnalogOut::Write(phaseV, 0.5f, pwmFreq);
-		AnalogOut::Write(phaseW, 0.5f, pwmFreq);
+		WritePhaseDuties(0.5f, 0.5f, 0.5f);
+		lastDutyU = lastDutyV = lastDutyW = 0.5f;
 	}
 }
 
@@ -79,6 +203,77 @@ void FocController::Coast() noexcept
 	// d = 0 (voltage mode): alpha = -q*sin(θ), beta = q*cos(θ)
 	alpha = -q * sine;
 	beta  =  q * cosine;
+}
+
+void FocController::ApplyDqVoltage(float vd, float vq, uint16_t electricalAngle) noexcept
+{
+	if (outputMode != FocOutputMode::ThreePhase)
+	{
+		// Only the 3-phase path can be current-controlled: current sensing exists solely on the DRV8316,
+		// which is a 3-phase driver. Fall back to the q-only command so a mis-set configuration degrades
+		// to voltage mode rather than driving something meaningless.
+		ApplyTorque(vq, electricalAngle);
+		return;
+	}
+
+	float sine, cosine;
+	Trigonometry::FastSinCos(electricalAngle, sine, cosine);
+	sine   /= 248.0f;
+	cosine /= 248.0f;
+
+	// Full inverse Park. The d = 0 case reduces to InversePark() above, which is the invariant that keeps
+	// voltage mode and current mode commanding the same thing for the same q.
+	const float alpha = (vd * cosine) - (vq * sine);
+	const float beta  = (vd * sine)   + (vq * cosine);
+
+	float duty_u, duty_v, duty_w;
+	Svpwm(alpha, beta, duty_u, duty_v, duty_w);
+
+	WritePhaseDuties(duty_u, duty_v, duty_w);
+	lastDutyU = duty_u;
+	lastDutyV = duty_v;
+	lastDutyW = duty_w;
+}
+
+/*static*/ void FocController::MeasureDq(float ia, float ib, float ic, uint16_t electricalAngle,
+		const SenseFrameCorrection& correction, float& id, float& iq) noexcept
+{
+	float sine, cosine;
+	Trigonometry::FastSinCos(electricalAngle, sine, cosine);
+	sine   /= 248.0f;
+	cosine /= 248.0f;
+
+	// Clarke, amplitude-preserving form. Deliberately uses all three measurements rather than the usual
+	// two-phase shortcut (ialpha = ia, ibeta = (ia + 2*ib)/sqrt3, which assumes ia+ib+ic == 0). The three
+	// current-sense amplifiers have independent zero offsets, so the measured sum carries a small DC bias
+	// - around 40mA on the DRV8316 EVM - and the shortcut would fold all of it into ibeta as a fake
+	// quadrature current. This form rejects it instead: a common offset d on all three phases contributes
+	// (2d - d - d)/3 = 0 to ialpha and (d - d)/sqrt3 = 0 to ibeta. The third ADC reading is already being
+	// taken, so using it is free.
+	constexpr float OneOverSqrt3 = 0.5773502692f;
+	float ialpha = (2.0f * ia - ib - ic) * (1.0f / 3.0f);
+	float ibeta  = (ib - ic) * OneOverSqrt3;
+
+	// Rotate (or reflect) the measured vector into the drive frame. Both cases are the standard 2x2:
+	// a mirrored frame needs the reflection about half the offset angle, an aligned one the rotation by
+	// minus the offset. Identity correction leaves ialpha/ibeta untouched, so hardware that is wired the
+	// way the firmware assumes pays nothing for this.
+	if (correction.mirrored)
+	{
+		const float a = (ialpha * correction.cosOffset) + (ibeta * correction.sinOffset);
+		const float b = (ialpha * correction.sinOffset) - (ibeta * correction.cosOffset);
+		ialpha = a; ibeta = b;
+	}
+	else if (correction.sinOffset != 0.0f)
+	{
+		const float a = (ialpha * correction.cosOffset) + (ibeta * correction.sinOffset);
+		const float b = (ibeta * correction.cosOffset) - (ialpha * correction.sinOffset);
+		ialpha = a; ibeta = b;
+	}
+
+	// Park - the exact inverse of InversePark() above; see the header for why that matters.
+	id =  ialpha * cosine + ibeta * sine;
+	iq = -ialpha * sine   + ibeta * cosine;
 }
 
 /*static*/ void FocController::Svpwm(float alpha, float beta,
@@ -154,9 +349,7 @@ void FocController::ApplyTorque3Phase(float torqueMagnitude, float sine, float c
 	float duty_u, duty_v, duty_w;
 	Svpwm(alpha, beta, duty_u, duty_v, duty_w);
 
-	AnalogOut::Write(phaseU, duty_u, pwmFreq);
-	AnalogOut::Write(phaseV, duty_v, pwmFreq);
-	AnalogOut::Write(phaseW, duty_w, pwmFreq);
+	WritePhaseDuties(duty_u, duty_v, duty_w);
 	lastDutyU = duty_u;
 	lastDutyV = duty_v;
 	lastDutyW = duty_w;
@@ -206,12 +399,10 @@ void FocController::ApplyTorqueHybrid(float torqueMagnitude, float sine, float c
 	const float Umax = max(max(Ua, Ub), 0.0f);
 	const float Vo   = -(Umin + Umax) * 0.5f + 0.5f;	// synthetic C (midpoint) offset
 
-	lastDutyU = constrain<float>(Ua + Vo, 0.0f, 1.0f);
-	lastDutyV = constrain<float>(Ub + Vo, 0.0f, 1.0f);
-	lastDutyW = constrain<float>(Vo,      0.0f, 1.0f);
-	AnalogOut::Write(phaseU, lastDutyU, pwmFreq);	// coil A
-	AnalogOut::Write(phaseV, lastDutyV, pwmFreq);	// coil B
-	AnalogOut::Write(phaseW, lastDutyW, pwmFreq);	// motor midpoint
+	lastDutyU = constrain<float>(Ua + Vo, 0.0f, 1.0f);	// coil A
+	lastDutyV = constrain<float>(Ub + Vo, 0.0f, 1.0f);	// coil B
+	lastDutyW = constrain<float>(Vo,      0.0f, 1.0f);	// motor midpoint
+	WritePhaseDuties(lastDutyU, lastDutyV, lastDutyW);
 }
 
 void FocController::ApplyTorque(float torqueMagnitude, uint16_t electricalAngle) noexcept

@@ -174,6 +174,7 @@ public:
 
 	void PhaseStepControlLoop() noexcept;
 	void ClosedLoopDiagnostics(size_t driver, const StringRef& reply) noexcept;
+	void ClosedLoopDriverDiagnostics(size_t driver, const StringRef& reply) noexcept;
 	void ResetPhaseStepMonitoringVariables() noexcept;
 	void ResetPhaseStepControlLoopCallTime() noexcept;
 

@@ -26,6 +26,7 @@
 # endif
 # if SUPPORT_DRV8316_SPI
 #  include "DRV8316.h"
+#  include "FocCurrentSense.h"
 # endif
 
 constexpr float MaxSafeBacklash = 0.22;					// the maximum backlash in full steps that we can use - error if there is more
@@ -85,6 +86,9 @@ public:
 
 	const char *_ecv_array GetModeText() const noexcept;
 	void InstanceDiagnostics(size_t driver, const StringRef& reply) noexcept;
+	// Gate-driver / current-sense hardware state, reported as a separate M122 part because each
+	// part shares one 500-char reply buffer and silently truncates when it overflows.
+	void InstanceDriverDiagnostics(size_t driver, const StringRef& reply) noexcept;
 
 	// Methods called by the motion system
 	EncoderType GetEncoderType() const noexcept
@@ -119,6 +123,7 @@ public:
 
 	static void Init() noexcept;
 	static void Diagnostics(const StringRef& reply) noexcept;
+	static void DriverDiagnostics(const StringRef& reply) noexcept;
 
 	// Functions run by tasks
 	[[noreturn]] void DataTransmissionTaskLoop() noexcept;
@@ -262,6 +267,72 @@ private:
 	uint16_t lastFocElectricalAngle = 0;
 	float lastFocTorqueMagnitude = 0.0f;
 	bool lastFocDriverFault = false;
+
+	// Rotor-frame view of the measured phase currents, refreshed every control tick from
+	// FocController::MeasureDq(), plus the d/q voltages that produced them. Observation only in voltage
+	// mode - nothing feeds back from these yet - but they are the evidence that decides whether closing
+	// current loops is safe: id near zero says the commutation angle is right, and iq tracking
+	// lastFocTorqueMagnitude in sign says the measurement frame agrees with the command frame. Closing a
+	// loop on a frame that fails either test would drive the motor confidently in the wrong direction.
+	//
+	// Voltages are in volts when M569.1 N (supply voltage) is configured, otherwise a fraction of the bus.
+	float lastFocId = 0.0f;
+	float lastFocIq = 0.0f;
+	float lastFocVd = 0.0f;
+	float lastFocVq = 0.0f;
+
+	// Orientation of the current-sense frame relative to the drive frame, measured during the alignment
+	// sweep - the one place where the commanded electrical angle is known independently of the encoder
+	// and the torque is constant. See the sweep in SetClosedLoopEnabled() for why nowhere else will do.
+	//
+	// direction: +1 the two frames agree, -1 the sense frame is mirrored (phase leads or ISEN inputs in
+	// opposite rotational order), 0 not measured. offsetDeg is the residual angle between the measured
+	// current vector and the commanded voltage vector, which should be small. confidence is the vector
+	// mean length over the sweep, 0..1; near 1 means every sample agreed, near 0 means the measurement is
+	// noise and neither hypothesis should be believed.
+	int8_t focSenseFrameDirection = 0;
+	uint16_t focSenseFrameSamples = 0;
+	uint16_t focSenseFrameClipped = 0;							// sweep samples rejected for failing Kirchhoff, i.e. saturated
+	float focSenseFrameOffsetDeg = 0.0f;
+	float focSenseFrameConfidence = 0.0f;
+
+	// Torque the alignment sweep actually used, after the current-limiting ramp backed it off from the
+	// W/voltage-scale ceiling. 0 means the ramp did not run (no current sensing).
+	float focAlignTorqueUsed = 0.0f;
+
+	// The correction derived from the above and applied to every d/q measurement, plus what was left
+	// over after snapping to the 60-degree grid. The residual is the winding's load angle and is
+	// deliberately NOT corrected; a large one means the snap picked the wrong grid point.
+	FocController::SenseFrameCorrection focSenseCorrection;
+	float focSenseFrameResidualDeg = 0.0f;
+
+	// Current-mode (d/q) control. Off unless M569.1 F gives a non-zero gain AND the current sense is
+	// calibrated AND the sense frame has been measured - see FocCurrentModeActive(). Everything falls back
+	// to voltage mode otherwise, which is what boards without current sensing always do.
+	//
+	// Gains are shared between the d and q axes: both see the same winding, so the same L and R, and
+	// nothing is gained by tuning them apart. Units are bus-voltage fraction per amp (Kp) and per
+	// amp-second (Ki). For a winding of resistance R and inductance L driven from a bus of V volts, a current loop of
+	// bandwidth w rad/s wants roughly Kp = L*w/V and Ki = R*w/V.
+	// All three arrive as one array parameter, M569.1 F{Kp, Ki, maxAmps} - the table had no room for
+	// three separate letters, see the note at the end of CanMessageGenericTables.h.
+	float focCurrentKp = 0.0f;
+	float focCurrentKi = 0.0f;
+	float focMaxCurrent = 0.0f;									// amps; the current-mode analogue of W
+
+	float focIdIntegral = 0.0f;									// integrator state, in bus-voltage fraction
+	float focIqIntegral = 0.0f;
+	float lastFocIqTarget = 0.0f;								// for diagnostics and telemetry
+	bool focCurrentModeRunning = false;							// whether the last tick actually ran the loops
+	uint32_t focCurrentModeDropouts = 0;						// times the loops fell back to voltage mode on a stale measurement
+
+	// True when the d/q loops may be run: gains set, hardware present, offsets calibrated and the sense
+	// frame measured. Closing a loop on an uncalibrated frame would regulate onto the wrong axis.
+	bool FocCurrentModeActive() const noexcept;
+
+	// Whether the current d/q reading is fresh enough to feed back from. False on a saturated or
+	// incoherent scan, which is what stops a saturation event latching the loops at full output.
+	bool FocMeasurementUsable() const noexcept;
 #endif
 
 #if SUPPORT_DRV8316_SPI
@@ -368,6 +439,16 @@ private:
 
 #if SUPPORT_FOC
 	void ApplyFocTorque(float torqueMagnitude, uint16_t electricalAngle) noexcept;
+
+	// Refresh lastFocId/lastFocIq from the latest phase-current measurement. Must be called before the
+	// output is computed on any tick where the current loops are running.
+	void MeasureFocDq(uint16_t electricalAngle) noexcept;
+
+	// Record the applied d/q voltages (bus-voltage fractions) into lastFocVd/lastFocVq for telemetry.
+	void RecordFocVoltages(float vd, float vq) noexcept;
+
+	// Apply a d/q voltage vector through the output stage. Both are bus-voltage fractions.
+	void ApplyFocDqVoltage(float vd, float vq, uint16_t electricalAngle) noexcept;
 
 	// One electrical revolution in encoder counts: the value measured by the alignment sweep if we have
 	// one, otherwise derived from the configured CPR and pole pair count. Returns 0 if neither is usable.

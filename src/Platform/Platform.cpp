@@ -759,12 +759,19 @@ void Platform::Init()
 	mcuTemperature.minimum = 999.0;
 	mcuTemperatureAdjust = 0.0;
 
-	// Set up the MCU temperature sense filters
+	// Set up the MCU temperature sense filters.
+	// Which ADC these live on matters on boards that need a whole ADC for something else - see
+	// MCU_TEMP_ADC_NUMBER in the board configuration. Enabling a channel is what causes AnalogIn to take
+	// ownership of an ADC (AdcClass::InternalEnableChannel calls ReInit on the first one), so moving
+	// these off a device is what frees it.
+#ifndef MCU_TEMP_ADC_NUMBER
+# define MCU_TEMP_ADC_NUMBER	0
+#endif
 #if SAME5x
 	tpFilter.Init(0);
-	AnalogIn::EnableTemperatureSensor(0, tpFilter.CallbackFeedIntoFilter, CallbackParameter(&tpFilter), 1, 0);
+	AnalogIn::EnableTemperatureSensor(0, tpFilter.CallbackFeedIntoFilter, CallbackParameter(&tpFilter), 1, MCU_TEMP_ADC_NUMBER);
 	tcFilter.Init(0);
-	AnalogIn::EnableTemperatureSensor(1, tcFilter.CallbackFeedIntoFilter, CallbackParameter(&tcFilter), 1, 0);
+	AnalogIn::EnableTemperatureSensor(1, tcFilter.CallbackFeedIntoFilter, CallbackParameter(&tcFilter), 1, MCU_TEMP_ADC_NUMBER);
 #elif SAMC21 || RP2040
 	tsensFilter.Init(0);
 	AnalogIn::EnableTemperatureSensor(tsensFilter.CallbackFeedIntoFilter, CallbackParameter(&tsensFilter), 1);

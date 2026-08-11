@@ -440,7 +440,10 @@ static GCodeResult InitiateReset(const CanMessageReset& msg, const StringRef& re
 
 static GCodeResult GetInfo(const CanMessageReturnInfo& msg, const StringRef& reply, uint8_t& extra)
 {
-	static constexpr uint8_t LastDiagnosticsPart = 7;				// the last diagnostics part is typeDiagnosticsPart0 + 7
+	// Each part gets its own String<StringLength500>, and a part that overflows it is silently truncated
+	// with no indication in the output. Part 7 (closed loop) was already close to full, so gate-driver
+	// and current-sense state goes in part 8 rather than being appended to it.
+	static constexpr uint8_t LastDiagnosticsPart = 8;				// the last diagnostics part is typeDiagnosticsPart0 + 8
 
 	switch (msg.type)
 	{
@@ -610,6 +613,13 @@ static GCodeResult GetInfo(const CanMessageReturnInfo& msg, const StringRef& rep
 #endif
 #if SUPPORT_DRIVERS
 		FilamentMonitor::GetDiagnostics(reply);
+#endif
+		break;
+
+	case CanMessageReturnInfo::typeDiagnosticsPart0 + 8:
+		extra = LastDiagnosticsPart;
+#if SUPPORT_CLOSED_LOOP
+		ClosedLoop::DriverDiagnostics(reply);
 #endif
 		break;
 	}

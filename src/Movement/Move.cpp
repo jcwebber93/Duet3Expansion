@@ -2445,6 +2445,11 @@ void Move::ClosedLoopDiagnostics(size_t driver, const StringRef& reply) noexcept
 	dms[driver].closedLoopControl.InstanceDiagnostics(driver, reply);
 }
 
+void Move::ClosedLoopDriverDiagnostics(size_t driver, const StringRef& reply) noexcept
+{
+	dms[driver].closedLoopControl.InstanceDriverDiagnostics(driver, reply);
+}
+
 bool Move::EnableIfIdle(size_t driver) noexcept
 {
 	if (driverStates[driver] == DriverStateControl::driverIdle)
