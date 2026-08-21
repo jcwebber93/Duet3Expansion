@@ -2,18 +2,18 @@
  * FocController.h
  *
  * Field Oriented Control (FOC) output stage for BLDC/PMSM and stepper motors.
- * Voltage-mode only (first pass): d=0, q=torque_magnitude, no current sensing.
+ *
+ * Takes either a torque magnitude (ApplyTorque, d = 0) or a d/q voltage vector (ApplyDqVoltage), plus an
+ * electrical angle, and drives the phase PWMs.
  *
  * Three output modes:
  *   ThreePhase   — 3PWM BLDC/PMSM via SVPWM (EncoderType::bldc)
  *   TwoPhase4Pwm — 4PWM 2-phase stepper via sign-magnitude H-bridge (EncoderType::stepperFoc)
  *   HybridStepper — 3PWM hybrid stepper: 2-phase cos/sin + synthetic C midpoint (EncoderType::hybridStepperFoc)
  *
- * PWM carrier: boards that define FOC_CENTRE_ALIGNED_PWM (all three phases on one TCC) get a dedicated
- * dual-slope carrier driven straight from this class, which is a prerequisite for inline current
- * sensing - phase current has to be sampled at the centre of the all-low-side-on window. Boards whose
- * phases sit on independent TCCs fall back to the shared, edge-aligned AnalogOut::Write() path, which
- * is fine for voltage mode but cannot support synchronous sampling.
+ * Boards defining FOC_CENTRE_ALIGNED_PWM get a dual-slope carrier driven from this class, which inline
+ * current sensing requires. Boards with phases on independent TCCs fall back to AnalogOut::Write(),
+ * which works for voltage mode but cannot support synchronous sampling.
  */
 
 #ifndef SRC_CLOSEDLOOP_FOCCONTROLLER_H_
@@ -50,27 +50,20 @@ public:
 	// electricalAngle is in [0, 4095] matching Trigonometry::FastSinCos().
 	void ApplyTorque(float torqueMagnitude, uint16_t electricalAngle) noexcept;
 
-	// Apply a d/q voltage vector directly, for current-mode control. Both components are fractions of the
-	// bus voltage and the caller is responsible for keeping the magnitude within its voltage budget - see
-	// ClosedLoop's circular limit, which scales d and q together rather than clipping each, so that
-	// saturation shortens the vector without rotating it.
-	//
-	// ApplyTorque() above is the d = 0 special case. It stays because voltage mode is not going away:
-	// boards without current sensing, and any drive whose current-sense frame has not been calibrated,
-	// have no way to produce a meaningful d.
+	// Apply a d/q voltage vector, for current-mode control. Both are fractions of the bus voltage, and
+	// the CALLER must keep the magnitude within its voltage budget - see ClosedLoop's circular limit.
+	// ApplyTorque() above is the d = 0 case, still used by every drive without current sensing.
 	void ApplyDqVoltage(float vd, float vq, uint16_t electricalAngle) noexcept;
 
 	// Drive all phases to neutral (zero average voltage, motor coasts).
 	void Coast() noexcept;
 
-	// How the current-sense channels sit relative to the drive phases, as measured by the alignment
-	// sweep. The identity (no mirror, zero offset) is correct hardware; anything else is compensating for
-	// sense channels that do not line up with the phases they are supposed to be measuring.
+	// How the current-sense channels sit relative to the drive phases, measured by the alignment sweep.
+	// Identity means correctly wired hardware; anything else compensates for channels that do not line up
+	// with the phases they measure.
 	//
-	// Only multiples of 60 degrees are physically reachable here - the composite of "which sense channel
-	// reads which phase" (a permutation, so 0/120/240) and the amplifier's polarity (0 or 180) - so the
-	// offset is snapped to that grid by the caller. What is left over is the winding's own load angle,
-	// which is real and must NOT be calibrated out.
+	// The caller snaps the offset to a multiple of 60 degrees - only those are physically reachable. What
+	// is left over is the winding's load angle, which is real and must NOT be calibrated out.
 	struct SenseFrameCorrection
 	{
 		float cosOffset = 1.0f;			// cos and sin of the snapped offset
@@ -80,11 +73,9 @@ public:
 
 	// Measured phase currents → rotor reference frame (Clarke then Park).
 	//
-	// electricalAngle uses the same convention as ApplyTorque(), and this is the exact inverse of the
-	// InversePark() below, so a positive iq means current is flowing in the direction that a positive
-	// torqueMagnitude commands. That equivalence is the point: it makes iq directly comparable with the
-	// commanded value, and id a direct measure of whether the commutation angle is right - a correctly
-	// aligned drive in voltage mode puts almost everything on q and leaves id near zero.
+	// electricalAngle uses the same convention as ApplyTorque(), and this is the exact inverse of
+	// InversePark(), so iq is directly comparable with the commanded value and id measures whether the
+	// commutation angle is right - a correctly aligned drive leaves id near zero.
 	static void MeasureDq(float ia, float ib, float ic, uint16_t electricalAngle,
 						  const SenseFrameCorrection& correction, float& id, float& iq) noexcept;
 

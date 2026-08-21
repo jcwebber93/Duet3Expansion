@@ -2,12 +2,6 @@
  * DRV8316.h — TI DRV8316 gate driver SPI interface
  *
  * Handles register unlock, driver configuration, write verification and fault status decoding.
- *
- * Register map, field layouts and enum encodings were cross-checked against the SimpleFOC
- * Arduino-FOC-drivers implementation in Arduino-FOC-drivers/src/drivers/drv8316/ (drv8316_registers.h
- * for addresses and bitfields, drv8316.h for the enum values). That is a widely-used community
- * implementation rather than TI's document, so treat the datasheet as final authority if the two ever
- * disagree — but every value here matched it exactly.
  */
 
 #ifndef SRC_CLOSEDLOOP_DRV8316_H_

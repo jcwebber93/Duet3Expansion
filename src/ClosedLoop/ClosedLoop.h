@@ -99,11 +99,6 @@ public:
 	bool IsDcServoMode() const noexcept { return isDcServoMode; }
 
 #if SUPPORT_FOC
-	// True for a BLDC/FOC-controlled drive. Like DC servo, this drive's currentMotorPosition/target
-	// bookkeeping is physical and direction-independent (electrical commutation angle is derived
-	// straight from live encoder position, not from accumulated direction-signed step count), so it
-	// must NOT be inverted on an S0/S1 direction change the way a classic stepper's step count is -
-	// see Move::SetDirectionValue().
 	bool IsFocMode() const noexcept { return motorType == EncoderType::bldc || motorType == EncoderType::stepperFoc || motorType == EncoderType::hybridStepperFoc; }
 #endif
 
@@ -200,81 +195,21 @@ private:
 	float focMaxTorque = 1.0f;									// Peak torque fraction [0.0, 1.0] applied to FOC output (M569.1 W parameter)
 	float focMultiplier = 1.0f;									// +1 or -1 per S0/S1 direction setting; persisted so CollectSample can convert logical→physical space
 
-	// Voltage scaling: torqueMagnitude (a [-1,1] fraction) is otherwise applied directly as a duty-cycle
-	// fraction of the FULL supply voltage (see FocController::ApplyTorque), unlike SimpleFOC's explicit
-	// voltage_limit/voltage_power_supply split. When both are configured (M569.1 N = supply volts,
-	// O = voltage limit in volts), torqueMagnitude is scaled by focVoltageLimit/focSupplyVoltage before
-	// being sent to the driver, so W/running torque and the alignment pull can be expressed in real,
-	// predictable volts instead of an opaque 0..1 fraction of an unstated supply voltage. Zero means
-	// "not configured" - falls back to the pre-existing unscaled behaviour.
 	float focSupplyVoltage = 0.0f;								// nominal motor supply voltage in volts (M569.1 N parameter); 0 = not configured
 	float focVoltageLimit = 0.0f;								// FOC voltage limit in volts (M569.1 O parameter); 0 = not configured
 
-	// NB: there is deliberately no velocity ceiling on the outer loop's vel_target. One existed, borrowed
-	// from SimpleFOC's P_angle.limit and configured via M569.1 Q, but it clamped the SUM of the position
-	// correction AND the velocity/acceleration feedforward - making it a hard ceiling on total commanded
-	// axis velocity rather than a limit on the correction. Above that ceiling vel_error goes negative and
-	// the inner loop commands reverse torque, so the axis cannot exceed Q at all: measured at Q4000 on a
-	// move peaking at 53000 counts/sec, i.e. 13x over the cap, the loop brakes at full authority. It also
-	// duplicated a limit the motion planner already enforces (M203), in different units. The reason it was
-	// added in the first place - "a stalled rotor only gets a strong demand after error has built up" - was
-	// a symptom of the commutation bugs since fixed, not of an unclamped vel_target.
-	// If a genuine approach-rate limit is ever wanted, clamp Kpp*currentPositionError ALONE and leave the
-	// feedforward terms outside the clamp, so it can never cap the achievable feedrate.
 
-	// NB: there is deliberately no slew-rate limit on commanded torque. One existed (mirroring SimpleFOC's
-	// PID output_ramp) on the theory that it bounded phase current di/dt, but in a voltage-mode drive with
-	// no current loop it does not: peak current is set by the voltage MAGNITUDE, which focMaxTorque and
-	// GetFocVoltageScale() already clamp, and the winding's own L/R time constant (~1ms on a NEMA17-class
-	// BLDC) low-passes current far more aggressively than any rate a ~80us control tick could impose. A
-	// ramp slow enough to matter electrically is one that detunes the loop by an order of magnitude.
-	// If driver overcurrent trips need addressing, lower M569.1 O or add real current sensing.
-
-	// Encoder-to-electrical-angle relationship, MEASURED by the alignment sweep rather than assumed.
-	//
-	// focEncoderDirection is the sign of d(rotor electrical angle)/d(encoder count). Nothing used to
-	// determine it: the commutation formula simply assumed it was +1. It is a property of the wiring
-	// (encoder A/B order versus motor phase order), so on any rig where those happen to be the other
-	// way round the commanded field ran BACKWARDS relative to the rotor. That does not merely reverse
-	// the motor - it makes the commutation error grow at (assumed + true) rate instead of cancelling,
-	// so the rotor accelerates away from the alignment origin, passes peak torque, and is then trapped
-	// at the next zero-torque point a "false pole pitch" away. Measured directly on the SimpleFOCMini/
-	// BL17E19 test rig: the alignment sweep ramps the commanded angle 0 -> 4095 while the raw encoder
-	// count runs +300 -> -840, i.e. direction -1, and closed-loop moves stalled at a hard wall whose
-	// distance tracked 2048/(4096/countsPerElecRev + |true slope|) across a 4.4x range of M569.1 C.
-	//
-	// focCountsPerElecRev is one electrical revolution in encoder counts, taken straight from the same
-	// sweep (settle at an angle, sweep exactly one electrical revolution, settle at the same angle, take
-	// the signed count difference). Preferred over the value derived from C and the L pole-pair count
-	// because it is what the motor actually does; the derived value is still used as a plausibility band
-	// and reported alongside it, so a disagreement shows up as a diagnostic instead of silently drifting
-	// the commutation angle. 0 means "not measured" - fall back to the derived value.
+	// Encoder-to-electrical-angle relationship, MEASURED by the alignment
+	// 0 in focCountsPerElecRev means "not measured" - fall back to the value derived from C and L.
 	int8_t focEncoderDirection = 1;								// +1 or -1; sign of d(electrical angle)/d(encoder count)
 	uint32_t focCountsPerElecRev = 0;							// measured encoder counts per electrical revolution; 0 = not measured
 
-	// NB: there is no separate electrical-angle offset. Alignment settles the rotor's d-axis on electrical
-	// zero (it sweeps to 3*pi/2 so that ApplyTorque()'s built-in +90 degrees lands there), which makes a
-	// positive torqueMagnitude a genuine q-axis command at every encoder count by construction - the same
-	// guarantee SimpleFOC gets from setPhaseVoltage(v, 0, _3PI_2) in alignSensor(), and the reason it too
-	// has no q-axis verification step. An offset field and a live-torque-response search for it both
-	// existed here; both were scaffolding for the alignment-reference and commutation-direction bugs since
-	// fixed, and the evidence that justified them was itself an artefact of those bugs.
-
-	// Debug snapshot of the last electricalAngle/torqueMagnitude actually passed to ApplyFocTorque(), and
-	// the live external gate-driver nFAULT pin state (see FocDriverFaultPin, board config) sampled every
-	// control tick. Reported by M122; the pin is open-drain active-low, so lastFocDriverFault already
-	// accounts for the inversion (see InitFocDriverFaultPin()/ReadFocDriverFault() in ClosedLoop.cpp).
 	uint16_t lastFocElectricalAngle = 0;
 	float lastFocTorqueMagnitude = 0.0f;
 	bool lastFocDriverFault = false;
 
 	// Rotor-frame view of the measured phase currents, refreshed every control tick from
-	// FocController::MeasureDq(), plus the d/q voltages that produced them. Observation only in voltage
-	// mode - nothing feeds back from these yet - but they are the evidence that decides whether closing
-	// current loops is safe: id near zero says the commutation angle is right, and iq tracking
-	// lastFocTorqueMagnitude in sign says the measurement frame agrees with the command frame. Closing a
-	// loop on a frame that fails either test would drive the motor confidently in the wrong direction.
-	//
+	// FocController::MeasureDq(), plus the d/q voltages that produced them.
 	// Voltages are in volts when M569.1 N (supply voltage) is configured, otherwise a fraction of the bus.
 	float lastFocId = 0.0f;
 	float lastFocIq = 0.0f;
@@ -310,12 +245,14 @@ private:
 	// calibrated AND the sense frame has been measured - see FocCurrentModeActive(). Everything falls back
 	// to voltage mode otherwise, which is what boards without current sensing always do.
 	//
-	// Gains are shared between the d and q axes: both see the same winding, so the same L and R, and
-	// nothing is gained by tuning them apart. Units are bus-voltage fraction per amp (Kp) and per
-	// amp-second (Ki). For a winding of resistance R and inductance L driven from a bus of V volts, a current loop of
-	// bandwidth w rad/s wants roughly Kp = L*w/V and Ki = R*w/V.
-	// All three arrive as one array parameter, M569.1 F{Kp, Ki, maxAmps} - the table had no room for
-	// three separate letters, see the note at the end of CanMessageGenericTables.h.
+	// Gains are shared between the d and q axes - same winding, same L and R. Units are bus-voltage
+	// fraction per amp (Kp) and per amp-second (Ki); for bandwidth w rad/s on a bus of V volts,
+	// Kp = L*w/V and Ki = R*w/V, with Ki/Kp = R/L placing the PI zero on the plant pole.
+	//
+	// DO NOT DETUNE THESE FOR SAFETY. Near-unity proportional loop gain is correct for a current loop;
+	// slowing the inner loop breaks the cascade's timescale separation and causes runaway, not calm.
+	// Background: docs/foc-current-control.md#tuning
+	//
 	float focCurrentKp = 0.0f;
 	float focCurrentKi = 0.0f;
 	float focMaxCurrent = 0.0f;									// amps; the current-mode analogue of W
@@ -356,13 +293,12 @@ private:
 	unsigned int periodNumSamples = 0;					// how many samples are in sumOfPositionErrorSquares
 
 	float 	PIDPTerm;									// Proportional term
-	float 	PIDITerm = 0.0;								// Integral accumulator
+	float 	PIDITerm = 0.0;								// Integral accumulator 
 	float 	PIDDTerm;									// Derivative term
-	float	PIDVelITerm = 0.0;							// Velocity integral accumulator
 	float	PIDVTerm;									// Velocity feedforward term
 	float	PIDATerm;									// Acceleration feedforward term
 	float	PIDControlSignal;							// The overall signal from the PID controller
-	float	PIDJTerm;									// P Pos term
+	float	PIDJTerm;									// Position Proportional term
 	float 	vel_measured;
 	float	last_vel_error = 0.0;
 	float last_filtered_D = 0.0;
@@ -418,8 +354,7 @@ private:
 	float ControlMotorCurrents(StepTimer::Ticks now, StepTimer::Ticks ticksSinceLastCall) noexcept;
 
 	// Update the stall/pre-stall flags from currentPositionError and take the immediate stop action if a
-	// stall has just been detected. Called once per control tick, for every drive type - it used to be
-	// inline in the classic-stepper path only, which is why FOC drives had no stall detection at all.
+	// stall has just been detected. Called once per control tick, for every drive type
 	void UpdateStallDetection() noexcept;
 	void StartTuning(uint8_t tuningType) noexcept;
 	GCodeResult ProcessBasicTuningResult(const StringRef& reply) noexcept;

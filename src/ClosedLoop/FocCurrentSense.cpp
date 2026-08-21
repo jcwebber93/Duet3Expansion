@@ -11,10 +11,7 @@
 #include <Movement/StepTimer.h>
 #include <DmacManager.h>
 
-// Registers are written directly rather than through CoreN2G's hri_adc_* wrappers. Those live in
-// hri_adc_e54.h, whose entire body is inside #ifdef _SAME54_ADC_COMPONENT_ - the SAME51G19A device
-// header defines a different component macro, so the header compiles away to nothing here. The ADC_*
-// bitfield macros come from the device header and are available regardless.
+// Registers are written directly rather than through CoreN2G's hri_adc_* wrappers.
 
 namespace FocCurrentSense
 {
@@ -32,26 +29,17 @@ namespace FocCurrentSense
 		uint32_t overruns = 0;					// conversions discarded because the loop did not collect them in time
 		volatile uint32_t collectedCount = 0;	// total conversions collected; RefreshAllPhases() waits on this advancing
 
-		// One scan of the three phases lands here.
-		//
-		// NOT necessarily in the order the DSEQ table asks for them. The ADC applies a sequenced INPUTCTRL
-		// write to a later conversion than the one in flight when it arrives, so the buffer is a rotation
-		// of the table by some fixed amount. Measured on hardware: moving from the hand-walked mux to this
-		// scan shifted the sense-frame offset by exactly 240 degrees, which is a two-slot rotation.
-		//
-		// This is harmless because the alignment sweep measures the sense frame end to end - through the
-		// ADC, the DMA and the Clarke transform - and a whole-set rotation is one of the 60-degree
-		// possibilities it already snaps to. It is emphatically NOT safe to hand-label these as A/B/C and
-		// assume the labels are right; nothing downstream should do so.
+		// One scan of the three phases lands here - but NOT necessarily in DSEQ table order. The ADC applies
+		// a sequenced INPUTCTRL write to a later conversion than the one in flight, so the buffer is a fixed
+		// rotation of the table (measured: two slots).
 		alignas(4) volatile uint16_t dmaBuffer[NumPhases] = { 0, 0, 0 };
 		alignas(4) uint32_t dseqTable[NumPhases] = { 0, 0, 0 };		// INPUTCTRL values, filled in by Init()
 		uint32_t acceptedSets = 0, rejectedSets = 0, saturatedSets = 0;
 
 		// Polls since the last accepted scan. A control loop must never keep feeding on the last good
-		// reading: when the drive saturates an amplifier, EVERY subsequent scan is rejected, so a policy of
-		// "keep the previous set" freezes the feedback at whatever it last saw. An integrator then winds
-		// against an error that can no longer change, pins the output, and holds the motor at the current
-		// that caused the saturation. That is not hypothetical - it locked the test rig at 7A.
+		// reading: saturation makes every subsequent scan unusable, so "keep the previous set" freezes the
+		// feedback and an integrator then winds against an error that can never change. This locked the test
+		// rig at 7A. Background: docs/foc-current-sense.md#staleness
 		volatile unsigned int staleScans = 0;
 		constexpr unsigned int MaxStaleScans = 8;			// ~640us at the control tick
 
@@ -124,10 +112,9 @@ namespace FocCurrentSense
 
 		constexpr unsigned int CalibrationSamples = 256;
 
-		// Latest raw conversion per phase. Seeded to the nominal zero rather than 0: a raw count of 0 is
-		// not "no reading", it is a legitimate value meaning full negative scale, so leaving these at 0
-		// before any conversion has happened reports about -6A of phantom current that looks entirely
-		// real in a log. haveSample distinguishes the two cases for diagnostics.
+		// Seeded to nominal zero, NOT 0: a raw count of 0 is a legitimate reading meaning full negative
+		// scale, so zero-initialising reports about -6A of phantom current that looks real in a log.
+		// haveSample distinguishes "not yet measured" from "measured zero".
 		volatile uint16_t rawResult[NumPhases] = { ExpectedZero, ExpectedZero, ExpectedZero };
 		volatile bool haveSample[NumPhases] = { false, false, false };
 
@@ -138,11 +125,9 @@ namespace FocCurrentSense
 
 		// Write EVCTRL with the ADC disabled around the write.
 		//
-		// EVCTRL is one of the SAME5x ADC's enable-protected registers: writing it while CTRLA.ENABLE is
-		// set is silently discarded - no fault, no indication, the register simply does not change. That
-		// is what stopped event-triggered conversions from ever starting: STARTEI was written to an
-		// already-running ADC and never took, so no conversion was ever triggered, which showed up as no
-		// samples collected AND no overruns.
+		// EVCTRL is enable-protected: writing it while CTRLA.ENABLE is set is SILENTLY DISCARDED - no fault,
+		// no indication, the register simply does not change. Do not "simplify" this to a direct write.
+		// Background: docs/foc-current-sense.md#evctrl-enable-protected
 		void WriteEvctrl(uint8_t val) noexcept
 		{
 			const bool wasEnabled = (ADC0->CTRLA.reg & ADC_CTRLA_ENABLE) != 0;
@@ -160,8 +145,7 @@ namespace FocCurrentSense
 		}
 
 		// DSEQCTRL selects which ADC registers the sequencer DMA updates before each conversion. Bracketed
-		// with disable/enable for the same reason as EVCTRL above - the enable-protected list is easy to
-		// misread, and a silently discarded write here would look exactly like "the scan is not running".
+		// like EVCTRL above, and for the same reason.
 		void WriteDseqctrl(uint32_t val) noexcept
 		{
 			const bool wasEnabled = (ADC0->CTRLA.reg & ADC_CTRLA_ENABLE) != 0;
@@ -300,9 +284,7 @@ void FocCurrentSense::StartSynchronisedSampling() noexcept
 	}
 
 	// Route TCC0 overflow to the ADC's start-conversion input. TCC0 is configured for dual-slope PWM
-	// with the overflow at BOTTOM (see FocController::InitCentreAlignedPwm), which is the centre of the
-	// window where all three low-side FETs conduct - the only point in the period where phase current can
-	// be measured without switching noise. Verified on a scope by pulsing a GPIO from this same event.
+	// with the overflow at BOTTOM (see FocController::InitCentreAlignedPwm).
 	MCLK->APBBMASK.reg |= MCLK_APBBMASK_EVSYS;
 	GCLK->PCHCTRL[EVSYS_GCLK_ID_0 + FocCurrentSenseEventChannel].reg = GCLK_PCHCTRL_GEN(GclkNum60MHz) | GCLK_PCHCTRL_CHEN;
 	EVSYS->Channel[FocCurrentSenseEventChannel].CHANNEL.reg =
@@ -312,33 +294,13 @@ void FocCurrentSense::StartSynchronisedSampling() noexcept
 	EVSYS->Channel[FocCurrentSenseEventChannel].CHINTENCLR.reg = EVSYS_CHINTENCLR_EVD | EVSYS_CHINTENCLR_OVR;
 	EVSYS->USER[EVSYS_ID_USER_ADC0_START].reg = FocCurrentSenseEventChannel + 1;	// 0 means "not connected"
 
-	// Hand the mux over to DMA sequencing.
+	// Hand the mux over to DMA sequencing. The SAME5x ADC has no SEQCTRL (that is SAMD21/C21); it has
+	// DSEQ, where one DMA channel feeds INPUTCTRL and a second collects RESULT.
 	//
-	// What this replaces: the control loop advanced the mux by hand, one phase per tick, so the three
-	// phases were sampled up to 240us apart. The rotor barely moves in that time even at speed, but the
-	// TORQUE COMMAND changes between control ticks, and three phases captured at three different current
-	// amplitudes do not form a vector - the reconstructed angle is wrong, and no downstream calibration
-	// recovers it. Measured on hardware: frame consistency against the commanded voltage rose monotonically
-	// as samples were restricted to steadier current, which is that error being selected out. It also had a
-	// latent bug, in that a skipped INPUTCTRL write (SYNCBUSY still set) advanced the phase index without
-	// advancing the mux, mislabelling every reading from then on.
+	// Each conversion waits for the TCC0 overflow event: a 150us spread, but every sample at the quiet point of the carrier.
 	//
-	// The SAME5x ADC cannot sequence its own mux - it has no SEQCTRL, unlike the SAMD21/C21. What it has is
-	// DMA sequencing: one DMA channel writes INPUTCTRL values into DSEQDATA, the ADC applies each one to a
-	// subsequent conversion, and a second channel collects RESULT. The scan is therefore hardware-driven,
-	// which removes the mux race, and the phase-to-slot relationship is fixed rather than drifting - though
-	// it is a rotation of the table, not the table itself; see the note on dmaBuffer.
-	//
-	// AUTOSTART is deliberately LEFT OFF. With it set, each DSEQ write immediately starts a conversion, so
-	// the three would run back-to-back in ~6us - genuinely simultaneous - but free-running, unsynchronised
-	// to the PWM carrier, which puts every sample somewhere random in the switching cycle. Keeping
-	// AUTOSTART clear means each conversion still waits for the TCC0 overflow event, so all three are taken
-	// at the quiet point of the carrier, one per PWM period: a 150us spread rather than 240us.
-	//
-	// That is an improvement, not a cure. Getting carrier-synchronised AND simultaneous needs either the
-	// two ADCs converting in parallel (which this board cannot do - PA02/PA06/PA07 are all ADC0-only) or
-	// arming the scan from the carrier event itself via the DMAC's event input. Until then the current
-	// loop's bandwidth has to respect the residual spread.
+	// Background, including why simultaneous-and-synchronised is not reachable on this board:
+	// docs/foc-current-sense.md#dseq-scan
 	for (unsigned int phase = 0; phase < NumPhases; ++phase)
 	{
 		dseqTable[phase] = (uint32_t)(ADC_INPUTCTRL_MUXNEG_GND | (uint16_t)senseChannel[phase]);
@@ -414,7 +376,7 @@ void FocCurrentSense::Poll() noexcept
 	// Three real phase currents sum to zero. A set that fails that badly is not three phase currents -
 	// either the DMA armed mid-sequence and these are beats from two different ones, or an amplifier is
 	// saturated. Either way the vector it would produce is meaningless, so drop it and keep the last good
-	// set. Cheap in raw counts: a few subtractions, no conversion to amps.
+	// set. 
 	const int32_t sum = ((int32_t)a - (int32_t)PhaseZero(0))
 					  + ((int32_t)b - (int32_t)PhaseZero(1))
 					  + ((int32_t)c - (int32_t)PhaseZero(2));
@@ -432,8 +394,6 @@ void FocCurrentSense::Poll() noexcept
 		staleScans = 0;
 	}
 
-	// Re-arm for the next scan. Safe here: the block just completed, so the ADC has finished its third
-	// conversion and the next one cannot start until the next carrier event, up to a PWM period away.
 	ArmScanDma();
 }
 
@@ -469,10 +429,7 @@ void FocCurrentSense::GetPhaseCurrents(float& ia, float& ib, float& ic) noexcept
 
 float FocCurrentSense::RawToAmps(unsigned int phase, uint16_t raw) noexcept
 {
-	// amps = (Vsense - Vzero) / gain. Volts are recovered against whichever reference the ADC is actually
-	// measuring against, which is not necessarily the DRV8316's VREF - see AdcReferenceVolts. Each phase
-	// has its own zero offset; they differ by a few counts of CSA offset error. Falls back to the nominal
-	// zero before calibration has run.
+	// amps = (Vsense - Vzero) / gain
 	const float voltsPerCount = AdcReferenceVolts / (float)AdcFullScale;
 	const float zero = (zeroOffsetValid && phase < NumPhases) ? (float)zeroOffset[phase] : (float)ExpectedZero;
 	return (((float)raw - zero) * voltsPerCount) / DRV8316::CsaGainVoltsPerAmp;
@@ -501,11 +458,6 @@ bool FocCurrentSense::CalibrateZeroOffset(const StringRef& reply) noexcept
 		return false;
 	}
 
-	// Take the ADC back off the event trigger for the duration: calibration drives conversions in
-	// software, and leaving event starts enabled would interleave conversions of the wrong phase. The
-	// sequencer has to go too - while DSEQCTRL selects INPUTCTRL, the sequencer DMA overwrites it before
-	// every conversion, so ReadRaw() below would get whichever input the scan had reached rather than the
-	// one it asked for.
 	const bool wasSynchronised = synchronised;
 	synchronised = false;
 	WriteEvctrl(0);
@@ -584,10 +536,6 @@ void FocCurrentSense::AppendDiagnostics(const StringRef& reply) noexcept
 		synchronised = false;
 		WriteEvctrl(0);
 		WriteDseqctrl(0);							// ReadRaw needs INPUTCTRL honoured; the sequencer overwrites it
-		// The result channel has to go too, not just the sequencer. It is armed on adc0_resrdy, so it
-		// consumes RESULT the instant a conversion finishes - including ReadRaw's own software conversion,
-		// whose RESRDY it clears before ReadRaw can see it. Leaving it enabled made every polled reading
-		// time out and report 0xFFFF.
 		DmacManager::DisableChannel(DmacChanFocIsenseSeq);
 		DmacManager::DisableChannel(DmacChanFocIsenseRes);
 		polledA = ReadRaw(0);
@@ -600,20 +548,10 @@ void FocCurrentSense::AppendDiagnostics(const StringRef& reply) noexcept
 					(haveSample[1]) ? 'B' : '-', (haveSample[2]) ? 'C' : '-', overruns);
 	if (wasSynchronised)
 	{
-		// Read the registers back rather than trusting the writes. ADC EVCTRL is enable-protected, so a
-		// write to a running ADC is silently discarded; TCC EVCTRL is likewise protected once the timer
-		// is enabled. adcEv should read 0x02 (STARTEI is bit 1) and tccOvfeo should be 1 - if either is 0
-		// the event chain is broken at that end, which is otherwise indistinguishable from "no current".
+		// Read the registers back rather
 		reply.catf(", Apoll=%u, adcEv=0x%02x tccOvfeo=%u evUser=%u",
 						polledA, ADC0->EVCTRL.reg, (unsigned)TCC0->EVCTRL.bit.OVFEO,
 						(unsigned)EVSYS->USER[EVSYS_ID_USER_ADC0_START].reg);
-		// dseq is the DSEQCTRL read-back (expect 0x00000001: INPUTCTRL selected, AUTOSTART clear - another
-		// enable-protected register, so worth confirming the write took). ok/rej are complete three-phase
-		// scans accepted and rejected by the Kirchhoff test; a rejection rate that is not near zero means
-		// scans are being armed out of step and the readings do not belong to the phases they are filed under.
-		// sat counts scans with a phase against an ADC rail - an overcurrent past the sense range, not a
-		// sequencing problem - and is what tells the two failure modes apart. stale is polls since the
-		// last usable scan; any control loop stops feeding on these values once it exceeds its limit.
 		reply.lcatf("Isense dseq=0x%08x ok=%" PRIu32 " rej=%" PRIu32 " sat=%" PRIu32 " stale=%u%s",
 						(unsigned)ADC0->DSEQCTRL.reg, acceptedSets, rejectedSets, saturatedSets,
 						staleScans, (IsMeasurementFresh()) ? "" : " STALE");

@@ -60,14 +60,8 @@ FocController::FocController(Pin in1, Pin in2, Pin in3, Pin in4,
 
 #if defined(FOC_CENTRE_ALIGNED_PWM) && FOC_CENTRE_ALIGNED_PWM
 
-// Set up the shared TCC for dual-slope (centre-aligned) PWM.
-//
-// This deliberately bypasses AnalogOut::Write(). AnalogWriteTcc() in CoreN2G hard-codes
-// TCC_WAVE_WAVEGEN_NPWM_Val (single slope) and is shared by every PWM consumer on the board, so it
-// cannot be switched to dual slope without affecting unrelated outputs. Centre alignment is not a
-// preference here - inline current sensing requires sampling in the middle of the window where all
-// three low-side FETs are conducting, and only a centre-aligned carrier puts that window at a fixed,
-// event-addressable point in the period.
+// Set up the shared TCC for dual-slope (centre-aligned) PWM, bypassing AnalogOut::Write(). Needed for low side current sense.
+
 void FocController::InitCentreAlignedPwm() noexcept
 {
 	volatile Tcc * const tcc = FocTccDevices[FocPwmTccNumber];
@@ -279,28 +273,16 @@ void FocController::ApplyDqVoltage(float vd, float vq, uint16_t electricalAngle)
 /*static*/ void FocController::Svpwm(float alpha, float beta,
 		float& duty_u, float& duty_v, float& duty_w) noexcept
 {
-	// Standard 6-sector SVPWM using the reference vector's magnitude and angle directly.
+	// Standard 6-sector SVPWM, sector and in-sector angle taken directly from atan2f/sinf.
 	//
-	// A previous version of this function derived the sector from the sign pattern of three
-	// 120-degree-separated projections (Va/Vb/Vc) and switched on that pattern directly. That
-	// was WRONG in two independent ways, both verified numerically (a full-revolution sweep at
-	// 0.02-degree resolution, checking duty-cycle continuity): (1) the sign pattern does not
-	// enumerate sectors in angular order - the pattern visits sectors in the order 1,3,2,6,4,5,
-	// not 1,2,3,4,5,6, so switching on it directly applied the wrong sector's formula most of the
-	// time; and (2) even after correcting for that mis-ordering, the six per-sector (t1,t2)
-	// formulas were not mutually consistent at their shared boundaries (e.g. sector 2 and sector 3
-	// disagreed by a large amount at the exact same physical angle). Together these caused duty
-	// cycle jumps of up to ~100% of the full PWM range at six fixed electrical angles every
-	// revolution, independent of commanded torque magnitude or direction - i.e. every time the
-	// live commutation angle (in closed-loop mode) or the q-axis calibration sweep crossed one of
-	// these six angles, the actual applied phase voltage bore no relation to the intended vector.
-	// This is consistent with (and sufficient to fully explain) high current draw with no clean
-	// torque-producing rotation, and with intermittent driver overcurrent faults specifically
-	// during angle-sweeping operation (the calibration sweep, or any sustained rotation).
+	// DO NOT REPLACE THIS WITH A SIGN-PATTERN SECTOR LOOKUP. That is what it replaced, and it was wrong in
+	// two independent ways that together produced duty-cycle jumps of up to 100% of the PWM range at six
+	// fixed electrical angles every revolution. Verify any replacement numerically for continuity across a
+	// full revolution before trusting it. Background: docs/closed-loop-cascade.md#svpwm
 	//
-	// This replacement computes the sector and in-sector angle directly from atan2f/sinf, which is
-	// straightforward to verify by inspection and was confirmed continuous (residual ~1e-4, i.e.
-	// floating-point step noise only) across a full revolution at multiple torque magnitudes.
+	// A cheaper equivalent is available (min-max zero-sequence injection, as SimpleFOC uses) which gives
+	// identical phase voltages in the linear region without the atan2f and two sinf calls - see the same
+	// section. Not done yet.
 	const float Vref = sqrtf(alpha*alpha + beta*beta);
 	float theta = atan2f(beta, alpha);
 	if (theta < 0.0f)

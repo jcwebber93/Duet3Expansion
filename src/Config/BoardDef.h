@@ -175,4 +175,15 @@ constexpr size_t NumDrivers = 0;
 # define SUPPORT_DCSERVO				0
 #endif
 
+// These must be defined for EVERY board, not just the ones that use them: the build has -Werror=undef,
+// so an undefined macro inside an #if is a hard error rather than a silent 0. Platform.h and
+// ClosedLoop.h both test SUPPORT_DRV8316_SPI, and Platform.h is included everywhere.
+#ifndef SUPPORT_FOC
+# define SUPPORT_FOC					0
+#endif
+
+#ifndef SUPPORT_DRV8316_SPI
+# define SUPPORT_DRV8316_SPI			0
+#endif
+
 #endif /* SRC_CONFIG_BOARDDEF_H_ */
