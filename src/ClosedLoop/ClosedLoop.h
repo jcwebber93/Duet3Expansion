@@ -298,11 +298,8 @@ private:
 	float	PIDVTerm;									// Velocity feedforward term
 	float	PIDATerm;									// Acceleration feedforward term
 	float	PIDControlSignal;							// The overall signal from the PID controller
-	float	PIDJTerm;									// Position Proportional term
-	float 	vel_measured;
-	float	last_vel_error = 0.0;
-	float last_filtered_D = 0.0;
-
+	float	PIDJTerm;									// Position Proportional term, unused by the current control law
+	float 	vel_measured;								// Measured velocity, recorded by M569.5 but not used by the control law
 
 	uint16_t desiredStepPhase = 0;						// The desired position of the motor
 	uint16_t phaseOffset = 0;							// The amount by which the phase should be offset when in semi-open-loop mode

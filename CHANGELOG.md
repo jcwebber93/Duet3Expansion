@@ -82,9 +82,9 @@ alignment routine that *measures* the encoder-to-electrical relationship rather 
 
 ### Added — d/q current-mode control
 
-Two PI loops regulating `Iq` to the torque demand and `Id` to zero (`M569.1 F`), making the cascade
-position -> velocity -> current. Optional and off by default; the drive stays in voltage mode unless gains
-are set and the current sense is calibrated.
+Two PI loops regulating `Iq` to the torque demand and `Id` to zero (`M569.1 F`), so the position PID's
+output becomes a current demand rather than a voltage. Optional and off by default; the drive stays in
+voltage mode unless gains are set and the current sense is calibrated.
 
 Measured: current holds within about 3 degrees of the q-axis across the speed range, against 5 degrees
 rising to 24 in voltage mode, and peak phase current on a fast move fell from roughly 4 A to 1 A for the
@@ -110,8 +110,8 @@ Seven new `M569.5` telemetry channels (bits 17-23): three phase currents, `Id`, 
 - **The control law ran twice per tick for some drive types.** `InstanceControlLoop()` had three parallel
   branches that each also fell through into a shared tail, so DC servo and FOC executed
   `ControlMotorCurrents()` twice with an identical timestamp — double-integrating the I term and
-  corrupting the D term. **DC servo gains tuned against the old behaviour need roughly `I` doubled and
-  `D` halved.**
+  corrupting the D term. It still affects `I` tuning: `Ki` is now integrated once per tick, so an `I`
+  value carried over from before this fix wants roughly doubling.
 - **Closed-loop stall detection never ran for FOC drives.** It sat behind a tuning-error gate that a
   quadrature encoder can never clear, so `M569.1 E` thresholds were inert.
 - **A braceless `if` spanning a preprocessor boundary** meant a plain `M569.1 P... T... C...` could delete
@@ -122,6 +122,13 @@ Seven new `M569.5` telemetry channels (bits 17-23): three phase currents, `Id`, 
 
 ### Changed
 
+- **The control law is upstream's single-loop position PID again.** An intermediate version of this fork
+  ran a cascade — an outer position-P (`Kpp`, `M569.1 J`) producing a velocity setpoint, with
+  `Kp`/`Ki`/`Kd` acting on velocity error — for DC servo, FOC and classic stepper alike. It tracked
+  better on the bench but could not be tuned reliably: two working tunes were found with no gains in
+  common, and lowering an inner gain (the normal response to instability) produced a runaway rather than
+  damping it. All five terms act on position error again, `M569.1 J` is inert, and **any tune found
+  against the cascade is invalid**. See `docs/closed-loop-cascade.md#single-loop-pid`.
 - `M569.1 Q` no longer sets a FOC velocity limit (it remains torque-per-amp). The limit clamped the sum of
   the position correction *and* the feedforward terms, so it capped achievable feedrate and commanded
   reverse torque above the cap. `M203` already provides this limit.

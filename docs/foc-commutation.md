@@ -127,22 +127,26 @@ disagreement surfaces as a diagnostic rather than silently drifting the commutat
 Both are recorded here because the source now carries only a short "deliberately not" note, and both are
 the kind of thing that looks like an obvious missing feature to someone reading the loop fresh.
 
-### No velocity ceiling on `vel_target`
+### No velocity ceiling on the position demand
+
+Historic — this concerned the velocity setpoint of the cascade, which no longer exists (see
+[closed-loop-cascade.md](closed-loop-cascade.md#single-loop-pid)). Kept because the reasoning about
+`M569.1 Q` still explains why that parameter no longer sets a velocity limit.
 
 One existed, borrowed from SimpleFOC's `P_angle.limit` and configured via `M569.1 Q`. It clamped the
 **sum** of the position correction *and* the velocity/acceleration feedforward, making it a hard ceiling
 on total commanded axis velocity rather than a limit on the correction.
 
-Above that ceiling `vel_error` goes negative and the inner loop commands reverse torque, so the axis
-simply cannot exceed `Q`: measured at `Q4000` against a move peaking at 53,000 counts/s — 13× over the
-cap — the loop brakes at full authority. It also duplicated a limit the motion planner already enforces
-(`M203`), in different units.
+Above that ceiling the velocity error goes negative and the inner loop commands reverse torque, so the
+axis simply cannot exceed `Q`: measured at `Q4000` against a move peaking at 53,000 counts/s — 13× over
+the cap — the loop brakes at full authority. It also duplicated a limit the motion planner already
+enforces (`M203`), in different units.
 
 The reason it was added in the first place — "a stalled rotor only gets a strong demand after error has
-built up" — was a symptom of the commutation bugs above, not of an unclamped `vel_target`.
+built up" — was a symptom of the commutation bugs above, not of an unclamped velocity setpoint.
 
-If a genuine approach-rate limit is ever wanted, clamp `Kpp × currentPositionError` **alone** and leave
-the feedforward terms outside the clamp, so it can never cap the achievable feedrate.
+If a genuine approach-rate limit is ever wanted, clamp `PIDPTerm` **alone** and leave the feedforward
+terms outside the clamp, so it can never cap the achievable feedrate.
 
 Note that SimpleFOC retains this clamp, and correctly so for its use case: it has no motion planner
 supplying a trajectory, so clamping the setpoint is the only velocity limit available.

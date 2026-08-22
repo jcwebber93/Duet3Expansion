@@ -28,7 +28,7 @@ function to see what it does.
 | [foc-commutation.md](foc-commutation.md) | alignment reference, encoder direction, counts per electrical revolution, two limits that were removed |
 | [foc-current-sense.md](foc-current-sense.md) | ADC ownership, PWM-synchronous sampling, the DSEQ scan, frame calibration, saturation and staleness |
 | [foc-current-control.md](foc-current-control.md) | d/q loops, limiting and anti-windup, motor parameters, tuning, what `O` now does |
-| [closed-loop-cascade.md](closed-loop-cascade.md) | the three-branch restructure, stall detection, SVPWM |
+| [closed-loop-cascade.md](closed-loop-cascade.md) | the position PID control law and why the velocity loop went, the three-branch restructure, stall detection, SVPWM |
 | [board-config.md](board-config.md) | SAMME51 pin and peripheral allocation, ADC reference, DMA channels |
 | [telemetry.md](telemetry.md) | M569.5 channels: the ordering invariant, sign convention, and channel quirks |
 

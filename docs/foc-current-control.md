@@ -1,6 +1,6 @@
 # FOC current-mode (d/q) control
 
-The innermost loop of the cascade: how it is structured, why the limits and anti-windup are shaped the
+The innermost loop: how it is structured, why the limits and anti-windup are shaped the
 way they are, and how to tune it. Source: the current-mode branch of `ClosedLoop::ControlMotorCurrents()`,
 `ClosedLoop::FocCurrentModeActive()`, `FocController::ApplyDqVoltage()`, `FocController::MeasureDq()`.
 
@@ -120,16 +120,16 @@ Working values: **`F0.04:47:2.0`**. `Kp = 0.04` puts crossover at `Kp·Vdc/L` �
 `Kp = 0.04` gives a proportional loop gain near 1.0, which looks aggressive in isolation. **It is not,
 and detuning it caused a runaway to 7.1 A** with the measurement frozen for 232 consecutive samples.
 
-The mechanism is the cascade, not the loop:
+The mechanism is the loop nesting, not the loop itself:
 
 ```
 slow current loop -> cannot deliver the demanded Iq -> motor falls behind ->
-velocity loop winds up demanding more -> current loop commands maximum voltage ->
+position loop winds up demanding more -> current loop commands maximum voltage ->
 6V into 0.45 ohm -> saturation -> latch
 ```
 
 An inner loop's job is to be fast enough that the outer loop sees it as instantaneous. Slowing it breaks
-the timescale separation the cascade depends on. **Raise this gain if the response is sluggish; lower it
+the timescale separation this depends on. **Raise this gain if the response is sluggish; lower it
 only for genuine ringing.**
 
 Keep bandwidth well under 1/150 µs regardless — the three phase readings span 150 µs (see

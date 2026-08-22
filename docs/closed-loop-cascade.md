@@ -1,7 +1,7 @@
-# Closed-loop cascade structure
+# Closed-loop control structure
 
-How `ClosedLoop::InstanceControlLoop()` came to be shaped the way it is, and the SVPWM output stage.
-Source: `ClosedLoop::InstanceControlLoop()`, `ClosedLoop::UpdateStallDetection()`,
+How `ClosedLoop::InstanceControlLoop()` came to be shaped the way it is, the control law it runs, and the
+SVPWM output stage. Source: `ClosedLoop::InstanceControlLoop()`, `ClosedLoop::UpdateStallDetection()`,
 `ClosedLoop::ControlMotorCurrents()`, `FocController::Svpwm()`.
 
 ---
@@ -24,13 +24,6 @@ tail that did the same things again. Three consequences, all silent:
 Now: **per-drive-type preparation → one shared control call → one stall check → one sample → one
 statistics update**, with the stall logic extracted into `UpdateStallDetection()`.
 
-### Retuning note for DC servo
-
-`Ki` is now integrated once per tick instead of twice, so start at roughly **2× the previous `I`**, and
-halve `Kd` if used. `Kp`/`Kv`/`Ka`/`Kpp` are memoryless and unaffected. The velocity-filter window also
-doubles from 4 to 8 ticks, reducing quantisation noise at low speed at the cost of ~320 µs of extra phase
-lag.
-
 ### Why the control law is not gated on `!stall`
 
 For DC servo and FOC, `currentPositionError` is only computed *inside* `ControlMotorCurrents()`. Skipping
@@ -39,6 +32,63 @@ the detection edge instead, and `Heat::NewDriverFault()` is what actually stops 
 
 A classic stepper is still left energised on stall — its phase currents are its holding torque — while DC
 servo and FOC drop output.
+
+---
+
+## <a name="single-loop-pid"></a>The control law: single-loop position PID
+
+All three drive types — DC servo, FOC and classic stepper — run the same five-term law in
+`ControlMotorCurrents()`. Every term acts on **position error**, and the result is a torque demand in an
+arbitrary -256..+256 range that each branch maps onto its own output stage.
+
+| term | gain | `M569.1` | acts on |
+|---|---|---|---|
+| `PIDPTerm` | `Kp` | `R` | position error, clamped ±256 |
+| `PIDITerm` | `Ki` | `I` | position error × time, clamped ±`PIDIlimit` (80) |
+| `PIDDTerm` | `Kd` | `D` | `errorDerivativeFilter` derivative, clamped ±256 |
+| `PIDVTerm` | `Kv` | `V` | commanded speed (feedforward) |
+| `PIDATerm` | `Ka` | `A` | commanded acceleration (feedforward) |
+
+`PIDJTerm` / `Kpp` (`M569.1 J`) is **not used**. The parameter still parses and reports, and the
+telemetry channel still exists, but the law writes zero to it.
+
+### Why the velocity loop was removed
+
+An intermediate version ran a cascade instead: an outer position-P (`Kpp`) producing a velocity setpoint,
+and an inner velocity PID where `Kp`/`Ki`/`Kd` acted on *velocity* error. For FOC this stacked on top of
+the d/q current loops, giving three nested loops.
+
+It worked, and on the BLDC rig it measurably outperformed the single loop on tracking. It was removed
+because it could not be tuned reliably:
+
+- **Three loops need timescale separation.** Two independently "working" tunes were found with nothing in
+  common — `R1.05 I0.6 D0.001 J5.51` and `R250.05 I0 D2.11 J0.005` — which is the signature of a search
+  space with no useful gradient.
+- **Intuition inverts.** Lowering an inner-loop gain, the normal response to instability, *caused* a
+  runaway: the inner loop stopped keeping up, the outer loop wound up, and the drive saturated. This is
+  documented at [foc-current-control.md](foc-current-control.md#reducing-this-gain-is-destabilising-not-stabilising)
+  for the current loop and applied equally to the velocity loop.
+- **Every gain changed meaning** relative to a decade of Duet3D field tuning for `M569.1 R`/`I`/`D`.
+
+The FOC path is still a cascade in the sense that this position PID feeds the d/q current loops. What
+went is the *velocity* stage between them.
+
+### Retuning after the revert
+
+`Kp`/`Ki`/`Kd` now act on position error in steps, not velocity error. **Any cascade-era tune is
+invalid.** Start with `R` alone (`I0 D0 V0 A0`), raise it until the shaft is stiff enough or ringing
+starts, then add `I` for standstill holding and `D` last. `Kv`/`Ka` keep their upstream meaning.
+
+### Filter feeding
+
+`errorDerivativeFilter` supplies `PIDDTerm` and must be fed on every path that runs the law. The classic
+stepper path feeds it in `InstanceControlLoop()`; the DC servo and FOC paths feed it inside their own
+branches of `ControlMotorCurrents()`, because those branches compute `currentPositionError` themselves.
+It is reset alongside `PIDITerm` at every move start and stall transition — `SetTargetToCurrentPosition()`
+steps the error discontinuously, and stale history in a D term is a torque spike.
+
+`speedFilter` is still fed everywhere, but only feeds telemetry (`CL_RECORD_MEASURED_VELOCITY`), the
+stepper phase feedforward, and torque mode's speed limit.
 
 ---
 

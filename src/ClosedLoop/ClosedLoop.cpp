@@ -1257,8 +1257,7 @@ void ClosedLoop::UpdateStallDetection() noexcept
 			   )
 			{
 				PIDITerm = 0.0f;
-				last_vel_error = 0.0f;
-				last_filtered_D = 0.0f;
+				errorDerivativeFilter.Reset();
 				speedFilter.Reset();
 			}
 		}
@@ -1274,8 +1273,7 @@ void ClosedLoop::UpdateStallDetection() noexcept
 			if (isDcServoMode)
 			{
 				PIDITerm = 0.0f;
-				last_vel_error = 0.0f;
-				last_filtered_D = 0.0f;
+				errorDerivativeFilter.Reset();
 				ApplyDcTorque(0.0);
 			}
 #endif
@@ -1283,8 +1281,7 @@ void ClosedLoop::UpdateStallDetection() noexcept
 			if (IsFocMode())
 			{
 				PIDITerm = 0.0f;
-				last_vel_error = 0.0f;
-				last_filtered_D = 0.0f;
+				errorDerivativeFilter.Reset();
 				ApplyFocTorque(0.0f, lastFocElectricalAngle);
 			}
 #endif
@@ -1473,10 +1470,9 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 		{
 			// Start of a new move, resynchronise target to current position
 			SetTargetToCurrentPosition();
-			// Reset velocity loop state to avoid transient spikes from stale history
+			// Clear integrator and filter history so the resync is not seen as a torque spike
 			PIDITerm = 0.0f;
-			last_vel_error = 0.0f;
-			last_filtered_D = 0.0f;
+			errorDerivativeFilter.Reset();
 			speedFilter.Reset();
 			moveInstance->GetCurrentMotion(driverNumber, now, mParams); // Re-fetch
 		}
@@ -1484,36 +1480,26 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 		// Convert logical target back to physical counts for comparison, then error back to logical space
 		const float targetPhysicalCount = (mParams.position * encoder->GetCountsPerStep()) * multiplier;
 		currentPositionError = (targetPhysicalCount - (float)encoder->GetCurrentCount()) * encoder->GetStepsPerCount() * multiplier;
+		errorDerivativeFilter.ProcessReading(currentPositionError, now);	// this is what PIDDTerm reads below
 		speedFilter.ProcessReading(encoder->GetCurrentCount() * encoder->GetStepsPerCount(), now);
 
 		const float timeDelta = (float)ticksSinceLastCall * (1.0/(float)StepTimer::StepClockRate);
 
-		// 1. Outer Position Loop (P-controller)
-		PIDJTerm = Kpp * currentPositionError;
+		// Single-loop position PID with velocity and acceleration feedforward. All five terms act on the
+		// position error. Background: docs/closed-loop-cascade.md#single-loop-pid
+		PIDPTerm = constrain<float>(Kp * currentPositionError, -256.0, 256.0);
+		PIDDTerm = constrain<float>(Kd * errorDerivativeFilter.GetDerivative() * StepTimer::StepClockRate, -256.0, 256.0);
+		PIDITerm = constrain<float>(PIDITerm + Ki * currentPositionError * timeDelta, -PIDIlimit, PIDIlimit);
+		PIDVTerm = mParams.speed * Kv * (float)ticksSinceLastCall;
+		PIDATerm = mParams.acceleration * Ka * fsquare((float)ticksSinceLastCall);
+		PIDJTerm = 0.0f;												// Kpp (M569.1 J) is not used by this control law
 
-		// 2. Feedforward Terms
-		PIDVTerm = Kv * mParams.speed;
-		PIDATerm = Ka * mParams.acceleration * (float)ticksSinceLastCall;	// steps/tick² * ticks = steps/tick, same units as vel_target
+		PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDVTerm + PIDATerm, -256.0, 256.0);
 
-		// 3. Calculate Target Velocity (A feedforward is part of the velocity setpoint, not a raw torque bypass)
-		const float vel_target = PIDJTerm + PIDVTerm + PIDATerm;
+		vel_measured = speedFilter.GetDerivative() * multiplier;		// recorded by M569.5, not used by the law above
 
-		// 4. Inner Velocity Loop (PID)
-		// Velocity must also be converted to logical space for the PID comparison.
-		// multiplier is 1.0 for S1 (forward) and -1.0 for S0 (reverse).
-		vel_measured = speedFilter.GetDerivative() * multiplier;
-		const float vel_error = vel_target - vel_measured;
-		PIDPTerm = Kp * vel_error;
-		PIDITerm = constrain<float>(PIDITerm + (Ki * timeDelta * 0.5f * (vel_error + last_vel_error)), -PIDIlimit, PIDIlimit);
-		const float rawD = (timeDelta > 0.0f) ? (vel_error - last_vel_error) / timeDelta : last_filtered_D;
-		last_filtered_D += 0.1f * (rawD - last_filtered_D);
-		PIDDTerm = Kd * last_filtered_D;
-
-		// 5. Final Control Signal
-		PIDControlSignal = PIDPTerm + PIDITerm + PIDDTerm;
 		// Apply the multiplier to the output to ensure torque direction matches the logical coordinate space.
 		ApplyDcTorque(constrain<float>((PIDControlSignal * multiplier) / 256.0f, -1.0f, 1.0f));
-		last_vel_error = vel_error;
 		return fabsf(PIDControlSignal) / 256.0f;
 	}
 #endif
@@ -1538,8 +1524,7 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 			// Start of a new move: resynchronise planner origin to current encoder position and clear integrator history.
 			SetTargetToCurrentPosition();
 			PIDITerm = 0.0f;
-			last_vel_error = 0.0f;
-			last_filtered_D = 0.0f;
+			errorDerivativeFilter.Reset();
 			speedFilter.Reset();
 			// The current loops' integrators go too. They hold whatever voltage was needed to sustain the
 			// last move's current, which has nothing to do with this one, and starting a move by unwinding
@@ -1571,26 +1556,23 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 		const int32_t encoderCount = encoder->GetCurrentCount();
 		const float targetPhysicalCount = (mParams.position * encoder->GetCountsPerStep()) * multiplier;
 		currentPositionError = (targetPhysicalCount - (float)encoderCount) * encoder->GetStepsPerCount() * multiplier;
+		errorDerivativeFilter.ProcessReading(currentPositionError, now);	// this is what PIDDTerm reads below
 		speedFilter.ProcessReading((float)encoderCount * encoder->GetStepsPerCount(), now);
 
 		const float timeDelta = (float)ticksSinceLastCall * (1.0f / (float)StepTimer::StepClockRate);
 
-		// Outer position loop (P-controller → velocity setpoint)
-		PIDJTerm = Kpp * currentPositionError;
-		PIDVTerm = Kv * mParams.speed;
-		PIDATerm = Ka * mParams.acceleration * (float)ticksSinceLastCall;
-		const float vel_target = PIDJTerm + PIDVTerm + PIDATerm;
+		// Single-loop position PID with velocity and acceleration feedforward. All five terms act on the
+		// position error. Background: docs/closed-loop-cascade.md#single-loop-pid
+		PIDPTerm = constrain<float>(Kp * currentPositionError, -256.0, 256.0);
+		PIDDTerm = constrain<float>(Kd * errorDerivativeFilter.GetDerivative() * StepTimer::StepClockRate, -256.0, 256.0);
+		PIDITerm = constrain<float>(PIDITerm + Ki * currentPositionError * timeDelta, -PIDIlimit, PIDIlimit);
+		PIDVTerm = mParams.speed * Kv * (float)ticksSinceLastCall;
+		PIDATerm = mParams.acceleration * Ka * fsquare((float)ticksSinceLastCall);
+		PIDJTerm = 0.0f;												// Kpp (M569.1 J) is not used by this control law
 
-		// Inner velocity loop (PID)
-		vel_measured = speedFilter.GetDerivative() * multiplier;
-		const float vel_error = vel_target - vel_measured;
-		PIDPTerm = Kp * vel_error;
-		PIDITerm = constrain<float>(PIDITerm + (Ki * timeDelta * 0.5f * (vel_error + last_vel_error)), -PIDIlimit, PIDIlimit);
-		const float rawD = (timeDelta > 0.0f) ? (vel_error - last_vel_error) / timeDelta : last_filtered_D;
-		last_filtered_D += 0.1f * (rawD - last_filtered_D);
-		PIDDTerm = Kd * last_filtered_D;
+		PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDVTerm + PIDATerm, -256.0, 256.0);
 
-		PIDControlSignal = PIDPTerm + PIDITerm + PIDDTerm;
+		vel_measured = speedFilter.GetDerivative() * multiplier;		// recorded by M569.5, not used by the law above
 
 		// Compute the electrical angle from the encoder count, using the direction and scale MEASURED by
 		// the alignment sweep (see focEncoderDirection/focCountsPerElecRev in ClosedLoop.h) rather than
@@ -1682,7 +1664,6 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 			RecordFocVoltages(0.0f, torqueMagnitude);
 		}
 
-		last_vel_error = vel_error;
 		return fabsf(PIDControlSignal) / 256.0f;
 	}
 #endif
@@ -1748,38 +1729,20 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 		// We choose to use a PID control signal in the range -256 to +256. This is arbitrary.	
 		if (currentMode == ClosedLoopMode::closed)
 		{
-			// For steppers, we will also use the cascaded controller.
-			// The key is to perform the velocity loop calculations in ENCODER COUNTS, not steps.
+			// Single-loop position PID with velocity and acceleration feedforward. All five terms act on
+			// the position error. Background: docs/closed-loop-cascade.md#single-loop-pid
+			const float timeDelta = (float)ticksSinceLastCall * (1.0/(float)StepTimer::StepClockRate);
 
-			// 1. Outer Position Loop (P-controller) and Feedforward
-			// The output is a corrective velocity in steps/tick.
-			PIDJTerm = Kpp * currentPositionError;
-			PIDVTerm = Kv * mParams.speed;
-			PIDATerm = Ka * mParams.acceleration;
+			PIDPTerm = constrain<float>(Kp * currentPositionError, -256.0, 256.0);
+			PIDDTerm = constrain<float>(Kd * errorDerivativeFilter.GetDerivative() * StepTimer::StepClockRate, -256.0, 256.0);
+			PIDITerm = constrain<float>(PIDITerm + Ki * currentPositionError * timeDelta, -PIDIlimit, PIDIlimit);
+			PIDVTerm = mParams.speed * Kv * (float)ticksSinceLastCall;
+			PIDATerm = mParams.acceleration * Ka * fsquare((float)ticksSinceLastCall);
+			PIDJTerm = 0.0f;								// Kpp (M569.1 J) is not used by this control law
 
-			// 2. Calculate Target Velocity for Inner Loop
-			// Convert target velocity from steps/tick to counts/tick to match the units of the measured velocity.
-			const float vel_target_steps = PIDJTerm + PIDVTerm;
-			const float vel_target_counts = vel_target_steps / encoder->GetStepsPerCount();
+			PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDVTerm + PIDATerm, -256.0, 256.0);
 
-			// 3. Inner Velocity Loop (PID-controller)
-			// Recalculate measured velocity in counts/tick, NOT steps/tick.
-			static DerivativeAveragingFilter<SpeedFilterSize> stepperSpeedFilter;
-			stepperSpeedFilter.ProcessReading(encoder->GetCurrentCount(), now);
-			vel_measured = stepperSpeedFilter.GetDerivative();
-			const float vel_error = vel_target_counts - vel_measured;
-
-			const float timeDelta = (float)ticksSinceLastCall * (1.0/(float)StepTimer::StepClockRate);						// get the time delta in seconds
-
-			PIDPTerm = Kp * vel_error;
-			PIDITerm = constrain<float>(PIDITerm + (Ki * timeDelta * 0.5f * (vel_error + last_vel_error)), -PIDIlimit, PIDIlimit);
-			const float rawD = (timeDelta > 0.0f) ? (vel_error - last_vel_error) / timeDelta : 0.0f;
-			PIDDTerm = Kd * (0.1f * rawD + 0.9f * last_filtered_D);
-			last_filtered_D = (Kd > 0.0f) ? PIDDTerm / Kd : 0.0f;
-
-			// 4. Final Control Signal
-			PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDATerm, -256.0, 256.0);
-			last_vel_error = vel_error;
+			vel_measured = speedFilter.GetDerivative();		// recorded by M569.5, not used by the law above
 			
 			// i.e. if we are moving in the positive direction, we must apply currents with a positive phase shift
 			// The max abs value of phase shift we want is 1 full step i.e. 25%.
