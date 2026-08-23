@@ -105,8 +105,56 @@ New motor types on `M569.1 T`: `bldc`, `stepperFoc`, `hybridStepperFoc`.
 
 Seven new `M569.5` telemetry channels (bits 17-23): three phase currents, `Id`, `Iq`, `Vd`, `Vq`.
 
+`M122` gains a `FOC limits:` line reporting current-mode dropouts, ticks spent over the trip, and the
+fallback ceiling against the configured maximum, and `M569 D4` reports the alignment target current and
+how many settle corrections it needed.
+
 ### Fixed
 
+- **Commutation used a measured electrical period in preference to an exact one, and the error
+  accumulated with distance.** The alignment sweep measures counts-per-electrical-revolution, and the
+  drive adopted that figure whenever it was within a factor of two of the value derived from `C` and
+  `L`. But `C` and `L` are exact integers - `C1000 L3` is 4000/3 = 1333.33 counts exactly - while
+  the sweep is a 400 ms mechanical measurement that settles short every time (1293, 1294, 1301, 1320
+  observed on one rig). Because the period is a *scale factor* on the commutation angle, a 3% error is
+  11 degrees per electrical revolution, cumulative: on a 12,500-count move it reached 105 degrees, torque
+  collapsed as its cosine, and the motor stalled at full current. Shorter moves hid it - the same error
+  is only 52 degrees over 6,250 counts. Now the sweep supplies the *direction* always, and the *period*
+  only when it disagrees with `C`/`L` by more than 10% (i.e. the configuration is wrong).
+  See `docs/foc-commutation.md#counts-per-elec-rev`.
+- **The commutation angle is computed from an exact ratio.** Even the correctly rounded integer 1333
+  carries a 0.025% scale error that integrates to 27 degrees over 400,000 counts.
+  `ComputeFocElectricalAngle()` now works from a numerator/denominator pair, reducing modulo the
+  numerator (a whole number of electrical revolutions, so the reduction is lossless) before scaling.
+  Worst-case error over the same 400,000 counts falls to 0.087 degrees - one LSB of the angle
+  representation, and it does not accumulate.
+
+- **Losing the current measurement handed the drive full voltage authority.** `FocMeasurementUsable()`
+  false dropped straight to voltage mode, which clamps only to `W × O/N` — 9 V into a 1.34 Ω winding on
+  the test rig, or 6.7 A. That held the current past the ±6 A sense range, so the measurement could never
+  recover and the drive stayed there: **164 consecutive ticks at 7.1 A** in one log, and a second run was
+  already latched before its move began. The fallback is now bounded by a ceiling re-seeded from the last
+  regulated output and decayed (100 ms stale, 10 ms saturated), which contains the fault *and* provides
+  the recovery path. Voltage mode by configuration (`F` absent) is unchanged.
+  See `docs/foc-current-control.md#fallback`.
+- **A saturated current reading was treated as missing data.** Clipping is the sense reporting an
+  overcurrent, but it was folded into the staleness count and so meant "no scan arrived". It is now
+  tracked separately, on a shorter threshold (3 scans against 9) — without which the loop spends ~480 µs
+  feeding on the last pre-saturation reading, which reads *low* and makes it command more voltage into an
+  overcurrent. See `docs/foc-current-sense.md#saturation`.
+- **Exceeding the measured-current trip dropped out of current mode** — removing the loops that reduce
+  current at the moment they were needed. It now stays in current mode and squeezes the output ceiling
+  to 25% instead.
+- **The alignment current ramp measured a moving rotor.** It reported settling at 0.083 of bus while the
+  sweep that followed drew 5.5-6.1 A, still at the sense rail. The rotor is still swinging into alignment
+  while the ramp runs, and the back EMF of that motion suppresses every reading it takes. The ramp is now
+  a coarse first guess only, corrected by measuring a *stationary* rotor during the existing pre-settle
+  window - no extra time against the CAN reply budget. Alignment has a current **floor** as well as a
+  ceiling: too little and the sweep cannot turn the rotor, which sets `TuningError::TooLittleMotion` and
+  gates the control law entirely, leaving the drive inert. The correction is therefore bounded by a
+  deadband, a per-pass limit and an absolute floor, and the target is `min(3.0 A, F-maxCurrent x 1.5)` -
+  headroom over the running limit, because alignment is a brief static hold that must overcome cogging.
+  See `docs/foc-current-sense.md#alignment-overcurrent`.
 - **The control law ran twice per tick for some drive types.** `InstanceControlLoop()` had three parallel
   branches that each also fell through into a shared tail, so DC servo and FOC executed
   `ControlMotorCurrents()` twice with an identical timestamp — double-integrating the I term and

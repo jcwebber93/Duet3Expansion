@@ -234,6 +234,8 @@ private:
 	// Torque the alignment sweep actually used, after the current-limiting ramp backed it off from the
 	// W/voltage-scale ceiling. 0 means the ramp did not run (no current sensing).
 	float focAlignTorqueUsed = 0.0f;
+	uint8_t focAlignCorrections = 0;
+	uint32_t focMeasuredElecRevCounts = 0;					// what the sweep measured, 0 if it was rejected							// settle-and-correct passes the alignment needed
 
 	// The correction derived from the above and applied to every d/q measurement, plus what was left
 	// over after snapping to the 60-degree grid. The residual is the winding's load angle and is
@@ -261,7 +263,40 @@ private:
 	float focIqIntegral = 0.0f;
 	float lastFocIqTarget = 0.0f;								// for diagnostics and telemetry
 	bool focCurrentModeRunning = false;							// whether the last tick actually ran the loops
-	uint32_t focCurrentModeDropouts = 0;						// times the loops fell back to voltage mode on a stale measurement
+	uint32_t focCurrentModeDropouts = 0;						// times the loops fell back on an unusable measurement
+	uint32_t focCurrentTrips = 0;								// times the measured current exceeded the trip level
+
+	// Output ceiling used when current mode is configured but its measurement is unusable. Re-seeded from
+	// the regulated output on every good tick and decayed while the measurement is missing, so the drive
+	// resumes from a level known to be safe and goes quiet if the fault persists - instead of being handed
+	// full voltage authority at the exact moment nothing is limiting the current.
+	// Background: docs/foc-current-control.md#fallback
+	float focFallbackCeiling = 0.0f;
+
+	static constexpr float CurrentTripFactor        = 1.5f;		// x focMaxCurrent before the ceiling is squeezed
+	static constexpr float OverTripOutputFraction   = 0.25f;	// ceiling applied while over the trip
+	static constexpr float FallbackHeadroom         = 1.10f;	// margin over the last regulated output
+	static constexpr float FallbackDecayStale       = 0.100f;	// s; a brief gap barely dents the output
+	static constexpr float FallbackDecaySaturated   = 0.010f;	// s; already over range, so collapse fast
+	static constexpr float FallbackFloorFraction    = 0.02f;	// below this fraction of maxOutput, stop driving
+
+	// Alignment current limiting. The alignment sweep has a current FLOOR as well as a ceiling - it has to
+	// drag the rotor through a full electrical revolution against cogging and inertia, and a sweep that
+	// fails to move the rotor sets TuningError::TooLittleMotion, which gates the control law entirely.
+	// Every constant below exists to stop the correction undershooting.
+	// Background: docs/foc-current-sense.md#alignment-overcurrent
+	static constexpr float AlignMaxCurrent          = 3.0f;		// A, upper bound whatever the motor is configured for
+	static constexpr float AlignCurrentHeadroom     = 1.5f;		// x focMaxCurrent: alignment is a brief static hold
+	static constexpr float AlignMinTorque           = 0.02f;	// never reduce below this fraction of the bus
+	static constexpr float AlignCorrectionDeadband  = 1.25f;	// only correct when clearly over target, not to chase it
+	static constexpr float AlignMinScalePerPass     = 0.60f;	// bound one pass, so a bad reading cannot collapse it
+	static constexpr float AlignMinRetained         = 0.40f;	// floor across all passes, relative to the ramp result
+	static constexpr float RampBlindFraction        = 0.25f;	// used when the coarse ramp never reads over target
+	static constexpr unsigned int MaxAlignCorrections = 2;		// settle-and-correct passes allowed
+
+	// Within this much of the C/L value the two are taken to agree and the exact derived period is used.
+	// Outside it the configuration is suspect and the sweep, biased as it is, becomes the better guess.
+	static constexpr uint32_t ElecPeriodAgreementPercent = 10;
 
 	// True when the d/q loops may be run: gains set, hardware present, offsets calibrated and the sense
 	// frame measured. Closing a loop on an uncalibrated frame would regulate onto the wrong axis.
@@ -270,6 +305,10 @@ private:
 	// Whether the current d/q reading is fresh enough to feed back from. False on a saturated or
 	// incoherent scan, which is what stops a saturation event latching the loops at full output.
 	bool FocMeasurementUsable() const noexcept;
+
+	// Whether the sense amplifiers are clipping. Unusable as a reading, but it is a positive report of
+	// an overcurrent, so it drives the output down harder than a merely stale measurement does.
+	bool FocMeasurementSaturated() const noexcept;
 #endif
 
 #if SUPPORT_DRV8316_SPI
@@ -387,6 +426,11 @@ private:
 
 	// One electrical revolution in encoder counts: the value measured by the alignment sweep if we have
 	// one, otherwise derived from the configured CPR and pole pair count. Returns 0 if neither is usable.
+	// The electrical period as an exact rational in encoder counts, so the commutation angle never
+	// carries a rounding error that integrates with distance.
+	// Background: docs/foc-commutation.md#counts-per-elec-rev
+	void GetFocElecPeriod(uint32_t& numerator, uint32_t& denominator) const noexcept;
+
 	uint32_t GetFocCountsPerElecRev() const noexcept;
 
 	// Commutation angle (0..4095) for a raw encoder count, applying the measured encoder direction.

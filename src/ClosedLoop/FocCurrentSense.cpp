@@ -43,6 +43,14 @@ namespace FocCurrentSense
 		volatile unsigned int staleScans = 0;
 		constexpr unsigned int MaxStaleScans = 8;			// ~640us at the control tick
 
+		// Saturation is tracked SEPARATELY from staleness even though both make a set unusable, because
+		// they mean opposite things to the caller. A stale set is an absence of information. A saturated
+		// set is information: the current is past the sense range. Folding the two together is what let a
+		// momentary overcurrent hand the position loop unregulated full voltage authority - which held the
+		// current past the rail, so it never came back. Background: docs/foc-current-sense.md#saturation
+		volatile unsigned int saturatedScans = 0;
+		constexpr unsigned int MaxSaturatedScans = 2;		// tolerate a lone transient before declaring it
+
 		// A reading this close to either rail is not a measurement, it is a clamp, and on these amplifiers
 		// it means the current is past the sense range entirely.
 		constexpr uint16_t AdcRailMargin = 16;
@@ -368,6 +376,7 @@ void FocCurrentSense::Poll() noexcept
 	if (a <= AdcRailMargin || a >= RailHigh || b <= AdcRailMargin || b >= RailHigh || c <= AdcRailMargin || c >= RailHigh)
 	{
 		++saturatedSets;
+		if (saturatedScans < MaxSaturatedScans + 1) { saturatedScans = saturatedScans + 1; }
 		NoteStaleScan();
 		ArmScanDma();
 		return;
@@ -392,6 +401,7 @@ void FocCurrentSense::Poll() noexcept
 		collectedCount = collectedCount + NumPhases;		// not ++: deprecated on a volatile in C++20
 		++acceptedSets;
 		staleScans = 0;
+		saturatedScans = 0;
 	}
 
 	ArmScanDma();
@@ -447,7 +457,18 @@ bool FocCurrentSense::IsCalibrated() noexcept
 
 bool FocCurrentSense::IsMeasurementFresh() noexcept
 {
-	return synchronised && staleScans <= MaxStaleScans;
+	// Saturation counts against freshness on its OWN, shorter threshold. Waiting for the staleness count
+	// to expire would leave the loop feeding on the last pre-saturation set for another ~480us - and that
+	// set reads low, so the loop responds by commanding more voltage into an overcurrent.
+	return synchronised && staleScans <= MaxStaleScans && saturatedScans <= MaxSaturatedScans;
+}
+
+// True when the amplifiers are clipping, i.e. the phase current is past the sense range. Distinct from
+// !IsMeasurementFresh(): both mean the reading is unusable, but this one also says the drive is in an
+// overcurrent and must reduce output rather than fall back to an unregulated path.
+bool FocCurrentSense::IsSaturated() noexcept
+{
+	return saturatedScans > MaxSaturatedScans;
 }
 
 bool FocCurrentSense::CalibrateZeroOffset(const StringRef& reply) noexcept

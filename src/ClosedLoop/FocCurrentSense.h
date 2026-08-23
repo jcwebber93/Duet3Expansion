@@ -74,6 +74,9 @@ namespace FocCurrentSense
 	// Background: docs/foc-current-sense.md#staleness
 	bool IsMeasurementFresh() noexcept;
 
+	// True when the amplifiers are clipping - an overcurrent report, not an absence of data.
+	bool IsSaturated() noexcept;
+
 	void AppendDiagnostics(const StringRef& reply) noexcept;
 }
 

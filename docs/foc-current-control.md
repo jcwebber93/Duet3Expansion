@@ -80,6 +80,10 @@ current trip at 1.5 × K, above the demand limit but inside the sense range.
 Note that `1.5 × K` must stay inside what the hardware can measure. The sense rails at about ±6 A, so
 above **K ≈ 3.5 A** the trip lands outside the measurable range and stops protecting anything.
 
+Exceeding the trip does **not** leave current mode — the loops are what reduce the current, so removing
+them is backwards. It squeezes the output ceiling to a quarter instead. See
+[What happens when the measurement fails](#fallback).
+
 ---
 
 ## <a name="motor-parameters"></a>Motor parameters
@@ -165,16 +169,135 @@ and would also close the stall gap below.
 
 ---
 
-## <a name="known-gap"></a>Known gap: stalls
+## <a name="fallback"></a>What happens when the measurement fails
 
-The stale-measurement fallback breaks a current-loop latch but **cannot help a genuine stall**. A stalled
-motor produces a saturated position error, so voltage mode commands `maxOutput` too — the same voltage,
-the same current, and the measurement stays saturated.
+This is the most consequential piece of the current-mode path, and the first version of it was wrong in a
+way that made things worse rather than merely not better.
 
-This is pre-existing voltage-mode behaviour rather than anything current mode introduced, but current
-mode makes it easier to reach. Closing it needs a sustained-overcurrent fault that drops the drive, at
-the cost of aborting a move on a real machine.
+### The original behaviour, and why it latched
 
-There is also **no current trip at all in voltage mode**, even though the hardware is measuring current:
-the 1.5 × K check only applies inside the current-mode branch. Running the DRV8316 build without `F` set
-therefore gives current *visibility* but no current *protection* beyond the driver's own OCP.
+The mode gate was a single condition:
+
+```cpp
+if (FocCurrentModeActive() && FocMeasurementUsable() && currentWithinLimit) { /* current mode */ }
+else                                                                        { /* voltage mode */ }
+```
+
+Voltage mode clamps the position loop's output to `maxOutput` = `W × O/N`. On the test rig that is 0.375
+of a 24 V bus — **9 V into a 1.34 Ω terminal resistance, or 6.7 A.** So losing the measurement did not
+reduce the drive's authority, it *removed the only thing regulating it*.
+
+That closes a loop with no exit:
+
+```
+current briefly exceeds the ±6 A sense range
+   -> amplifiers clip -> measurement unusable
+      -> leave current mode -> position loop gets full voltage authority
+         -> 9 V applied -> 6.7 A -> still past the sense range
+            -> measurement still unusable ------------------------------┐
+                                                                        │
+      <-----------------------------------------------------------------┘
+```
+
+Observed on the rig: **164 consecutive control ticks (656 ms)** at 7.1 A phase current with no way back,
+and in a separate run the drive was already latched *before the move started* and had to be stopped with
+an emergency stop. `M122` showed `sat=4719 ok=436` — over 90% of scans saturated — with
+`Isense A=7.042A` and `Vq=9.00V`, which is `maxOutput × Vbus` exactly.
+
+The trigger in that run was not even an overcurrent. The measured velocity glitched by 100 mm/s for one
+tick; at `R20000` that is a 335-unit swing in a ±256 control signal, the output slammed to the ceiling,
+and the latch did the rest.
+
+### Three separate defects
+
+**1. An overcurrent report was treated as missing data.** A saturated scan is the sense telling you the
+current is past full scale. It was folded into the staleness count and became indistinguishable from "no
+scan arrived". Fixed in `FocCurrentSense` — see
+[foc-current-sense.md](foc-current-sense.md#saturation).
+
+**2. The trip dropped out of current mode.** `currentWithinLimit` sat in the mode gate, so exceeding the
+trip *removed the current loops*. But the loops are the mechanism that brings current down — they respond
+to a high `Iq` by commanding less voltage. Dropping them at that moment is precisely backwards. The trip
+now stays inside current mode and squeezes the output ceiling to `OverTripOutputFraction` (25%) instead,
+which forces the same loops to back off.
+
+**3. The fallback had full authority.** Fixed below.
+
+### The bounded, decaying fallback
+
+The `else` branch now distinguishes two cases that had been sharing one path:
+
+| case | ceiling |
+|---|---|
+| `M569.1 F` absent or zeroed — **voltage mode by configuration** | `maxOutput`, unchanged |
+| `F` set but the measurement is unusable — **a fault** | `focFallbackCeiling`, decaying |
+
+`focFallbackCeiling` is re-seeded on every successful current-mode tick from the output the loops are
+*actually* using:
+
+```cpp
+focFallbackCeiling = min(appliedMagnitude × FallbackHeadroom, maxOutput);
+```
+
+That value has a useful property: it was, one tick ago, producing a regulated current at or below
+`focMaxCurrent`. Resuming from it is a bumpless transfer into a level already known to be safe, rather
+than a jump to full authority.
+
+While the measurement stays unusable the ceiling decays:
+
+| condition | time constant | rationale |
+|---|---|---|
+| stale scan | 100 ms | a brief gap barely dents the output; motion is not disturbed |
+| **saturated** | **10 ms** | already past the sense range — collapse |
+
+Below 2% of `maxOutput` it snaps to zero, so a persistent fault ends with the drive quiet.
+
+**The decay is also the recovery path.** As the ceiling falls the current falls with it, comes back inside
+the sense range, the amplifiers stop clipping, `saturatedScans` clears on the next accepted set, and the
+loops resume — which immediately re-seeds the ceiling. Nothing needs to detect "the fault is over"; it
+falls out of the same mechanism that contains it.
+
+### What this does not do
+
+It does not stop the motor. A drive that has decayed to a zero ceiling produces no torque, so position
+error grows and the existing stall detection (`M569.1 E`) fires `Heat::NewDriverFault()` in the normal
+way. That is the intended escalation — the fallback's job is to stop the drive hurting itself while the
+existing fault path decides what to do about the move.
+
+It also means a rig whose current sense never works at all, but which *is* configured for current mode,
+will not move. That is deliberate: the alternative is the 7 A behaviour above. `M122` says so directly —
+`FOC current mode: LIMITED (sense saturated)` with `fallback ceiling=0.0000 of 0.3750`.
+
+### Reading it in `M122`
+
+```
+FOC current mode: RUNNING, Kp=0.0400 Ki=47.0 maxI=2.00A, IqTarget=0.172A, integ d=-0.000 q=0.002
+FOC limits: dropouts=2 overcurrent-ticks=0, fallback ceiling=0.0143 of 0.3750
+```
+
+- `RUNNING` / `LIMITED (stale measurement)` / `LIMITED (sense saturated)` / `configured but INACTIVE`
+- `dropouts` counts transitions out of current mode; `overcurrent-ticks` counts control ticks spent over
+  the trip while still regulating.
+- A `fallback ceiling` well below `maxOutput` during a `LIMITED` state is the containment working. If it
+  ever sits at `maxOutput` while `LIMITED`, something has bypassed the seeding.
+
+
+---
+
+## <a name="known-gap"></a>Known gap: voltage mode has no current protection
+
+The [bounded fallback](#fallback) covers the case where current mode is *configured*. A stall there now
+resolves the way it should: the stalled motor draws its way past the sense range, saturation is detected,
+the ceiling collapses on the 10 ms constant, and the position error that is no longer being corrected
+trips `M569.1 E` stall detection into `Heat::NewDriverFault()`.
+
+**The gap is the other configuration.** With `F` absent or zeroed the drive is in voltage mode by choice,
+keeps full `W × O/N` authority, and there is no measured-current trip at all — the `1.5 × K` check only
+exists inside the current-mode branch. On a DRV8316 build that means current *visibility* with no current
+*protection* beyond the driver's own 16 A OCP, which is set for the device rather than for the motor.
+
+On the test rig `maxOutput` at `O9` is 9 V into 1.34 Ω — **6.7 A**, about 2.8× the motor's peak rating.
+Lowering `O` is the only lever a user currently has, and it trades away running headroom to get it.
+
+Closing this properly means applying a measured-current limit in voltage mode too, which is a
+straightforward extension of the same ceiling mechanism but has not been done.

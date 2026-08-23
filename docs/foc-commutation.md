@@ -104,22 +104,119 @@ separately so the drive still runs on the measured value.
 
 ---
 
-## <a name="calibration-discrepancy"></a>Counts per electrical revolution
+## <a name="counts-per-elec-rev"></a>Counts per electrical revolution
 
-Measured 1136–1159 across runs, against 1133 derived from `C850 L3` — under 1% out.
+This number is a **scale factor on the commutation angle**, so any error in it accumulates with distance
+travelled instead of averaging out. That property is what makes it worth this much attention.
 
-This was not always so clean. With the earlier `C1000` configuration, three independent measurements (the
-alignment sweep, the open-loop tracking slope, and the stall-distance fit) all put one electrical
-revolution at ~1145 counts against the 1333 that `C1000 L3` implies. 4000/1145 = 3.49, not an integer
-pole-pair count, so either the encoder was not 4000 counts/rev or the motor was not 3 pole pairs.
+### The failure that established it
 
-The 1141–1176 spread seen at one point was partly an artefact of the alignment sweep saturating the
-current sense — see [foc-current-sense.md](foc-current-sense.md#alignment-overcurrent). With the current
-limit in place the spread narrowed to 23 counts.
+Two runs, identical gains (`R20000 I0 D0 V1 A1 J0.0001`), differing only in what the alignment sweep
+happened to measure:
 
-The drive prefers the measured value over the derived one in all cases, and `M569 D4` reports both so a
-disagreement surfaces as a diagnostic rather than silently drifting the commutation angle.
+| | measured | used | result |
+|---|---|---|---|
+| good | 1320 | 1320 | completes 12,508 steps, cruises at 0.75 A |
+| bad | 1293 | 1293 | **stalls dead at 9,750 steps** at full current |
 
+`C1000 L3` is 4000 counts per mechanical revolution over 3 pole pairs — **1333.33 exactly**, since both
+are integers. Every measurement taken on the rig came in below it: 1293, 1294, 1301, 1320.
+
+Working the bad run forward: the drive advances the angle 360° per 1293 counts, the rotor advances 360°
+per 1333.33, so at the 9,750-count stall point the field is
+`9750/1293 × 360 − 9750/1333.3 × 360 = 81°` ahead of where it should be. Torque follows `Iq·cos(Δ)`, and
+`cos(81°) = 0.16`.
+
+The log agrees precisely. Same speed, same load, current climbing the whole way:
+
+```
+t =  60 ms   err  −35    Iq −0.53 A     0.53 A is ample here
+t = 340 ms   err  −73    Iq −1.14 A
+t = 420 ms   err −106    Iq −1.77 A
+t = 460 ms   err −171    Iq −1.99 A     current limit reached
+t = 620 ms   err −2758   Iq −2.00 A     stopped, full current, no motion
+```
+
+Rising current at constant speed **is** the signature of a drifting commutation angle. Nothing else
+produces it.
+
+> **`Id ≈ 0` does not mean commutation is healthy.** It stayed at 0.03–0.05 A in both runs. The forward
+> Park that measures and the inverse Park that drives use the *same* angle, so `Id` reads zero whether or
+> not that angle matches the rotor — the frame is self-consistent while being 81° off the real q-axis.
+> Torque per amp is the only quantity that reveals it.
+
+### Why it took so long to appear
+
+The error is proportional to distance, so a short move hides it:
+
+| move | counts | Δ at 1293 | torque penalty |
+|---|---|---|---|
+| 50 mm | 6,250 | 52° | 1.6× current — survivable |
+| 100 mm | 12,500 | 105° | past 90°, torque reverses |
+
+Every 50 mm test in this project ran with this error present. Doubling the move length is what finally
+pushed it past what the loop could compensate for.
+
+### What the sweep is for
+
+It is the only way to learn the encoder-to-electrical **direction**, and it is a good **check** that `C`
+and `L` describe the motor actually connected. It is a poor way to *measure* the period: a 400 ms
+mechanical experiment where the rotor settles short of the commanded angle by its load angle, biased low
+every single time.
+
+So the policy is now:
+
+- **Direction** always comes from the sweep.
+- **Period** comes from `C`/`L` when the two agree to within 10% — exact integers beat a biased
+  measurement.
+- **Period** comes from the sweep only when they disagree by more than 10%, because then `C` or `L` does
+  not describe this motor and a biased measurement is the better of two bad options. Reported as a
+  warning.
+- Outside 0.5×–2× the measurement is rejected outright and `TuningError::TooLittleMotion` /
+  `TooMuchMotion` gates the drive — that band exists to catch a blocked or unpowered shaft, not to police
+  configuration.
+
+### Exact rational arithmetic
+
+Even the right integer is not good enough. `1333.33` rounded to `1333` is a 0.025% scale error, which
+still integrates:
+
+| period used | worst angle error over 400,000 counts |
+|---|---|
+| `1293` (the bad run) | 105° **at 12,500 counts** |
+| `1333` (rounded exact) | 27° |
+| **`4000/3` (exact ratio)** | **0.087°** |
+
+0.087° is one LSB of the 4096-step angle representation — the floor, and it does not accumulate.
+
+`GetFocElecPeriod()` therefore returns the period as a numerator and denominator rather than a single
+count, and `ComputeFocElectricalAngle()` reduces modulo the **numerator** — a whole number of electrical
+revolutions, across which the angle repeats exactly — before scaling:
+
+```cpp
+remainder = (direction × count) mod numerator          // 0 .. numerator-1
+angle     = remainder × denominator × 4096 / numerator // 64-bit intermediate
+```
+
+The 64-bit intermediate is not optional at the top of the range: a 20-bit absolute encoder with 8 pole
+pairs needs `2^20 × 8 × 4096`, comfortably past `2^32`. The divide costs a few tens of cycles against an
+80 µs tick.
+
+When the period came from the sweep the denominator is 1, and the expression reduces to exactly what the
+old code computed — verified identical across ±50,000 counts.
+
+### Historical note
+
+An earlier `C850 L3` configuration measured 1136–1159 against 1133 derived — under 1% out, and at the
+time that looked like agreement worth trusting. It was, but only because those were short moves. The
+1141–1176 spread seen before the alignment current limit went in was partly the sweep saturating the
+current sense (see [foc-current-sense.md](foc-current-sense.md#alignment-overcurrent)).
+
+There is still an open question from the `C1000` era: three independent methods (the alignment sweep, the
+open-loop tracking slope, and the stall-distance fit) put one electrical revolution near 1145 counts, and
+`4000/1145 = 3.49` is not an integer pole-pair count. If that measurement was real then either the
+encoder is not 4000 counts/rev or the motor is not 3 pole pairs — and the 10% agreement band above would
+route around it silently. Worth resolving on the bench rather than in firmware.
 ---
 
 ## <a name="removed-limits"></a>Two limits that were removed

@@ -1616,16 +1616,31 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 
 		const float maxOutput = focMaxTorque * focVoltageScale;
 
-		// K limits the demand, not the current - maxOutput is a voltage and permits far more. So trip on
+		// Whether the measurement can be trusted this tick, and whether it is telling us we are already
+		// over range. These are different questions and get different answers below.
+		const bool measurementUsable = FocCurrentModeActive() && FocMeasurementUsable();
+		const bool senseSaturated = FocMeasurementSaturated();
+
+		// W limits the demand, not the current - maxOutput is a voltage and permits far more. So watch
 		// the MEASURED current too. Background: docs/foc-current-control.md#limits
 		const float measuredCurrentSq = (lastFocId * lastFocId) + (lastFocIq * lastFocIq);
-		const float currentTripSq = (focMaxCurrent * 1.5f) * (focMaxCurrent * 1.5f);
-		const bool currentWithinLimit = (measuredCurrentSq <= currentTripSq);
+		const bool overTrip = (measuredCurrentSq > fsquare(focMaxCurrent * CurrentTripFactor));
 
-		if (FocCurrentModeActive() && FocMeasurementUsable() && currentWithinLimit)
+		if (measurementUsable)
 		{
 			// Current mode: the PID output becomes a q-axis current demand, and the PI loops below find the
 			// voltage that delivers it. Full PID authority maps to focMaxCurrent amps.
+			//
+			// An over-trip reading does NOT leave current mode. The loops are what bring the current back
+			// down; dropping them removes the regulator at the one moment it is needed. Squeeze the output
+			// ceiling instead, which forces the same loops to command less voltage.
+			float outputCeiling = maxOutput;
+			if (overTrip)
+			{
+				++focCurrentTrips;
+				outputCeiling = maxOutput * OverTripOutputFraction;
+			}
+
 			const float normalisedDemand = constrain<float>((PIDControlSignal * multiplier * (float)focEncoderDirection) / 256.0f, -1.0f, 1.0f);
 			const float iqTarget = normalisedDemand * focMaxCurrent;
 			lastFocIqTarget = iqTarget;
@@ -1634,25 +1649,31 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 			const float idError = 0.0f - lastFocId;
 			const float iqError = iqTarget - lastFocIq;
 
-			focIdIntegral = constrain<float>(focIdIntegral + (focCurrentKi * idError * timeDelta), -maxOutput, maxOutput);
-			focIqIntegral = constrain<float>(focIqIntegral + (focCurrentKi * iqError * timeDelta), -maxOutput, maxOutput);
+			focIdIntegral = constrain<float>(focIdIntegral + (focCurrentKi * idError * timeDelta), -outputCeiling, outputCeiling);
+			focIqIntegral = constrain<float>(focIqIntegral + (focCurrentKi * iqError * timeDelta), -outputCeiling, outputCeiling);
 
 			float vd = (focCurrentKp * idError) + focIdIntegral;
 			float vq = (focCurrentKp * iqError) + focIqIntegral;
 
 			// Circular limit: scale d and q together. Clipping them separately would rotate the applied
 			// vector, putting torque on the direct axis exactly when the drive is working hardest.
-			const float mag = fastSqrtf((vd * vd) + (vq * vq));
-			if (mag > maxOutput && mag > 0.0f)
+			float mag = fastSqrtf((vd * vd) + (vq * vq));
+			if (mag > outputCeiling && mag > 0.0f)
 			{
-				const float scale = maxOutput / mag;
+				const float scale = outputCeiling / mag;
 				vd *= scale;
 				vq *= scale;
+				mag = outputCeiling;
 				// Back-calculation anti-windup: leave the integrators holding what would have produced the
 				// output actually applied.
 				focIdIntegral *= scale;
 				focIqIntegral *= scale;
 			}
+
+			// Seed the fallback ceiling from the output that is actually regulating the current right now,
+			// so if the measurement disappears on the next tick we resume from a level already known to
+			// produce a sane current rather than from full authority.
+			focFallbackCeiling = min<float>(mag * FallbackHeadroom, maxOutput);
 
 			focCurrentModeRunning = true;
 			lastFocTorqueMagnitude = vq;
@@ -1661,20 +1682,40 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks now, StepTimer::T
 		}
 		else
 		{
-			// Voltage mode: the PID output IS the q-axis voltage, clamped rather than scaled so that
-			// reducing W lowers the ceiling without lowering the gain.
-			//
-			// Also the fallback when current mode is configured but the measurement has gone stale. CLEAR
-			// the integrators rather than holding them - a held value is the wound-up state that caused the
-			// fault. Background: docs/foc-current-sense.md#staleness
-			if (focCurrentModeRunning)
+			// No current-mode regulation this tick. Two very different reasons land here.
+			float ceiling;
+			if (FocCurrentModeActive())
 			{
-				++focCurrentModeDropouts;
+				// Configured for current mode but the measurement is unusable. This is a FAULT path, not a
+				// mode choice. Handing the position loop full voltage authority here is what turned a
+				// momentary dropout into a sustained 7A latch on the test rig: unregulated maxOutput into a
+				// low-resistance winding sits past the sense range, which keeps the measurement unusable,
+				// which keeps the drive on this path. Bound the output and bleed it away instead - the
+				// current then falls back inside the sense range and the loops can pick up again.
+				// Background: docs/foc-current-control.md#fallback
+				if (focCurrentModeRunning)
+				{
+					++focCurrentModeDropouts;
+				}
+				focIdIntegral = 0.0f;
+				focIqIntegral = 0.0f;
+
+				// Saturation means we are already over range, so collapse quickly. A merely stale set only
+				// needs to bleed off, so a brief gap barely dents the output.
+				const float decayTime = (senseSaturated) ? FallbackDecaySaturated : FallbackDecayStale;
+				focFallbackCeiling -= focFallbackCeiling * min<float>(timeDelta / decayTime, 1.0f);
+				if (focFallbackCeiling < maxOutput * FallbackFloorFraction) { focFallbackCeiling = 0.0f; }
+				ceiling = focFallbackCeiling;
 			}
-			focIdIntegral = 0.0f;
-			focIqIntegral = 0.0f;
+			else
+			{
+				// Voltage mode by configuration - M569.1 F absent or zeroed. Nothing has gone wrong and the
+				// drive keeps its full W and N/O authority, exactly as before current sensing existed.
+				ceiling = maxOutput;
+			}
+
 			const float torqueMagnitude = constrain<float>((PIDControlSignal * multiplier * (float)focEncoderDirection) / 256.0f,
-															-maxOutput, maxOutput);
+															-ceiling, ceiling);
 			focCurrentModeRunning = false;
 			lastFocIqTarget = 0.0f;
 			lastFocTorqueMagnitude = torqueMagnitude;
@@ -1877,7 +1918,21 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 			reply.lcatf("FOC: align=%d move=%d poles=%u maxT=%.2f mult=%.0f, counts/elecRev=%" PRIu32 " (%s) dir%+d",
 				(int)focAlignmentDone, (int)hasMovementCommand, (unsigned)polePairCount, (double)focMaxTorque,
 				(double)focMultiplier, GetFocCountsPerElecRev(),
-				(focCountsPerElecRev != 0) ? "measured" : "C/L", (int)focEncoderDirection);
+				(focCountsPerElecRev != 0) ? "measured" : "C/L exact", (int)focEncoderDirection);
+			{
+				// The exact period is a ratio, and the rounded figure above hides the part that matters:
+				// a fraction of a count per electrical revolution still integrates over a long move.
+				uint32_t elecNumer, elecDenom;
+				GetFocElecPeriod(elecNumer, elecDenom);
+				if (elecDenom > 1)
+				{
+					reply.catf(" (exactly %" PRIu32 "/%" PRIu32 ")", elecNumer, elecDenom);
+				}
+				if (focMeasuredElecRevCounts != 0 && focCountsPerElecRev == 0)
+				{
+					reply.catf(", sweep measured %" PRIu32, focMeasuredElecRevCounts);
+				}
+			}
 			{
 				const float electricalAngleDegrees = ((float)lastFocElectricalAngle * 360.0f) / 4096.0f;
 				reply.lcatf("FOC last cmd: angle=%u (%.0fdeg) torque=%.4f enc=%" PRIi32 " fault=%s",
@@ -1933,10 +1988,20 @@ void ClosedLoop::InstanceDriverDiagnostics(size_t driver, const StringRef& reply
 		{
 			// Says whether the loops are actually running, not just configured - the preconditions in
 			// FocCurrentModeActive() are easy to miss and failing them looks like nothing happening.
-			reply.lcatf("FOC current mode: %s, Kp=%.4f Ki=%.1f maxI=%.2fA, IqTarget=%.3fA, integ d=%.3f q=%.3f, dropouts=%" PRIu32,
-				(focCurrentModeRunning) ? "RUNNING" : ((FocCurrentModeActive()) ? "FELL BACK to voltage mode (stale measurement)" : "configured but INACTIVE"),
+			reply.lcatf("FOC current mode: %s, Kp=%.4f Ki=%.1f maxI=%.2fA, IqTarget=%.3fA, integ d=%.3f q=%.3f",
+				(focCurrentModeRunning) ? "RUNNING"
+					: (!FocCurrentModeActive()) ? "configured but INACTIVE"
+					: (FocMeasurementSaturated()) ? "LIMITED (sense saturated)"
+					: (!FocMeasurementUsable()) ? "LIMITED (stale measurement)"
+					: "NOT RUNNING (control law gated - see tuning error above)",
 				(double)focCurrentKp, (double)focCurrentKi, (double)focMaxCurrent,
-				(double)lastFocIqTarget, (double)focIdIntegral, (double)focIqIntegral, focCurrentModeDropouts);
+				(double)lastFocIqTarget, (double)focIdIntegral, (double)focIqIntegral);
+			// The fallback ceiling is the number that says whether an unusable measurement is being contained.
+			// A dropout with a decaying ceiling is the drive protecting itself; the same dropout at full W is
+			// the failure this replaced. Background: docs/foc-current-control.md#fallback
+			reply.lcatf("FOC limits: dropouts=%" PRIu32 " overcurrent-ticks=%" PRIu32 ", fallback ceiling=%.4f of %.4f",
+				focCurrentModeDropouts, focCurrentTrips,
+				(double)focFallbackCeiling, (double)(focMaxTorque * GetFocVoltageScale()));
 		}
 	}
 	else
@@ -2103,19 +2168,23 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 			constexpr uint16_t alignTargetAngle = 3072u;
 
 #if SUPPORT_DRV8316_SPI
-			// Ramp the torque up while watching the current, and stop at a level sensible for THIS motor.
-			// Only ever reduces below the W ceiling. Holds alignTargetAngle, so it doubles as a pre-settle.
-			// Background: docs/foc-current-sense.md#alignment-overcurrent
+			// Cap the alignment current for THIS motor rather than pulling whatever W and N/O allow. Tied
+			// to the configured phase current where one is known, so a small motor is not aligned at a
+			// large one's level. Background: docs/foc-current-sense.md#alignment-overcurrent
+			const float alignTargetCurrent = (focMaxCurrent > 0.0f)
+												? min<float>(AlignMaxCurrent, focMaxCurrent * AlignCurrentHeadroom)
+												: AlignMaxCurrent;
 			if (FocCurrentSense::IsInitialised())
 			{
-				constexpr float AlignTargetCurrent = 2.5f;			// amps, ~40% of the +-6A sense range
-				constexpr float AlignMinTorque = 0.02f;				// never ramp below this
-				// x2ms, so 50ms worst case on top of the ~700ms sequence, against the ~900ms CAN reply
-				// budget noted above. In practice it exits after a few steps: the target current is
-				// reached at a small fraction of the ceiling, which is the whole point.
-				constexpr unsigned int RampSteps = 25;
+				// Coarse ramp: step the torque up and stop at the first reading over target. This only gets
+				// into the right region - see the settle-and-correct pass below, which is what actually
+				// sets the level.
+				constexpr unsigned int RampSteps = 25;			// x2ms, so 50ms worst case
 
-				float found = alignTorque;
+				// A measurement that never reads over target must NOT leave the ceiling untouched. Falling
+				// through the whole ramp used to mean full W authority, which is exactly the case where
+				// nothing is limiting the current.
+				float found = alignTorque * RampBlindFraction;
 				for (unsigned int step = 1; step <= RampSteps; ++step)
 				{
 					const float trial = (alignTorque * (float)step) / (float)RampSteps;
@@ -2126,7 +2195,7 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 					FocCurrentSense::GetPhaseCurrents(ia, ib, ic);
 					// Peak phase current, which is what saturates an amplifier - not the vector magnitude.
 					const float peak = max<float>(fabsf(ia), max<float>(fabsf(ib), fabsf(ic)));
-					if (peak >= AlignTargetCurrent)
+					if (peak >= alignTargetCurrent)
 					{
 						found = trial;
 						break;
@@ -2136,8 +2205,10 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 				// lo, which on a rig configured with a very small W would have RAISED the torque above the
 				// limit the user asked for - the opposite of this block's purpose.
 				alignTorque = (AlignMinTorque < alignTorque) ? max<float>(found, AlignMinTorque) : alignTorque;
-				focAlignTorqueUsed = alignTorque;
 			}
+			focAlignCorrections = 0;
+			focAlignTorqueUsed = alignTorque;
+			const float rampTorque = alignTorque;		// floor for the correction below
 #endif
 
 			// Three phases, ~700ms total:
@@ -2151,12 +2222,70 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 			constexpr StepTimer::Ticks sweepDurationTicks = (StepTimer::StepClockRate * 40) / 100;	// 400 ms
 			constexpr StepTimer::Ticks holdDurationTicks  = (StepTimer::StepClockRate * 18) / 100;	// 180 ms
 
-			// Phase 1: settle at the start angle.
+			// Phase 1: settle at the start angle, and correct the torque now that the rotor is stationary.
+			// The coarse ramp above measures a rotor that is still swinging into alignment, and the motional
+			// back EMF of that swing suppresses the current, so it reads low - on the test rig it settled on
+			// a level that then drew more than twice its target. This is the first point in the sequence
+			// where the current is the steady value the sweep will actually draw. It runs inside the
+			// existing settle window, so it costs nothing against the CAN reply budget.
+			// Background: docs/foc-current-sense.md#alignment-overcurrent
 			{
 				const StepTimer::Ticks phaseStart = StepTimer::GetTimerTicks();
-				while ((StepTimer::Ticks)(StepTimer::GetTimerTicks() - phaseStart) < preSettleTicks)
+#if SUPPORT_DRV8316_SPI
+				// Long enough after each change that the reading reflects it. An earlier version checked at
+				// 40ms and again 20ms later, and the second pass acted on a reading that had not caught up
+				// with the first - the two reductions compounded and took the sweep down to 0.85A, far under
+				// its 2.0A target, which is too weak to turn the rotor. Every guard below exists to stop
+				// that: a deadband so we do not chase the target, a bound on one pass, and a floor across
+				// all of them.
+				constexpr StepTimer::Ticks firstCheckTicks    = (StepTimer::StepClockRate * 6) / 100;	// 60 ms
+				constexpr StepTimer::Ticks checkIntervalTicks = (StepTimer::StepClockRate * 4) / 100;	// 40 ms
+				const float torqueFloor = max<float>(rampTorque * AlignMinRetained, AlignMinTorque);
+				StepTimer::Ticks nextCheck = firstCheckTicks;
+				unsigned int corrections = 0;
+#endif
+				for (;;)
 				{
+					const StepTimer::Ticks elapsed = (StepTimer::Ticks)(StepTimer::GetTimerTicks() - phaseStart);
+					if (elapsed >= preSettleTicks) { break; }
 					focController->ApplyTorque(alignTorque, alignTargetAngle);
+#if SUPPORT_DRV8316_SPI
+					if (FocCurrentSense::IsInitialised() && elapsed >= nextCheck && corrections < MaxAlignCorrections)
+					{
+						nextCheck = elapsed + checkIntervalTicks;
+						float scale = 0.0f;						// 0 means "no correction this pass"
+						float ia, ib, ic;
+						if (FocCurrentSense::RefreshAllPhases(2000))
+						{
+							FocCurrentSense::GetPhaseCurrents(ia, ib, ic);
+							const float peak = max<float>(fabsf(ia), max<float>(fabsf(ib), fabsf(ic)));
+							// Deadband: correct only when clearly over. Aiming exactly at the target invites
+							// an overshoot on the low side, and low is the failure that matters here.
+							if (peak > alignTargetCurrent * AlignCorrectionDeadband)
+							{
+								scale = alignTargetCurrent / peak;
+							}
+						}
+						else if (FocCurrentSense::IsSaturated())
+						{
+							// Clipping, so there is no reading to scale from - only the knowledge that we
+							// are past the sense range. Back off by the largest single step allowed.
+							scale = AlignMinScalePerPass;
+						}
+
+						if (scale > 0.0f)
+						{
+							// At standstill the winding is resistive, so current is nearly linear in applied
+							// voltage and one factor lands close. Bound the step anyway: a reading taken
+							// before the rotor settled is the thing that broke this before.
+							const float bounded = max<float>(scale, AlignMinScalePerPass);
+							alignTorque = max<float>(alignTorque * bounded, torqueFloor);
+							focAlignTorqueUsed = alignTorque;
+							++corrections;
+							focAlignCorrections = corrections;
+						}
+					}
+#endif
 					delay(1);
 				}
 			}
@@ -2269,13 +2398,26 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 			encoder->TakeReading();
 			const int32_t measuredElecRevCounts = encoder->GetCurrentCount() - sweepStartCount;	// signed: one electrical revolution
 
-			// Adopt the measurement, but only if it is in the same ballpark as the configured CPR/pole
-			// pair count. A blocked, hand-held or unpowered shaft would otherwise poison commutation
-			// outright, which is worse than the assumption we are replacing. Outside the band we keep the
-			// derived value and raise a tuning error, which stops InstanceControlLoop() from driving the
-			// motor at all until it is cleared. The band is deliberately wide (0.5x to 2x): its job is to
-			// reject a failed measurement, not to police a genuine CPR/pole-pair misconfiguration, which
-			// is reported below instead so that the drive still runs on the measured value.
+			// What the sweep is for, and what it is NOT for.
+			//
+			// It is the only way to learn the encoder-to-electrical DIRECTION, and it is a good check that
+			// C and L describe the motor actually connected. It is a poor way to measure the electrical
+			// period: it is a 400ms mechanical experiment, the rotor settles short of the commanded angle
+			// by its load angle, and every measurement on the test rig came in 1-3% BELOW the arithmetic
+			// value (1293, 1294, 1301, 1320 against 1333).
+			//
+			// Meanwhile C and L are exact integers, so counts-per-electrical-revolution derived from them
+			// is exact. Preferring a measurement over exact arithmetic cost a stalled motor: a 3% period
+			// error is a SCALE error on the commutation angle, so it accumulates with distance, and on a
+			// 12500-count move it reached 81 degrees - torque follows its cosine, so the drive needed
+			// nearly 4x the current and then could not move at all.
+			// Background: docs/foc-commutation.md#counts-per-elec-rev
+			//
+			// So: direction always comes from the sweep. The period comes from C/L when the two agree, and
+			// from the sweep only when they do not - because then C or L is wrong and the measurement,
+			// biased as it is, is the better of two bad options. The wide 0.5x-2x outer band rejects a
+			// failed measurement (blocked, hand-held or unpowered shaft) rather than policing a
+			// misconfiguration.
 			const uint32_t derivedCountsPerElecRev = (polePairCount != 0)
 					? (uint32_t)((encoder->GetCountsPerStep() * (float)encoder->GetStepsPerRev()) / (float)polePairCount)
 					: 0;
@@ -2285,13 +2427,22 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 				&& measuredMagnitude <= derivedCountsPerElecRev * 2)
 			{
 				focEncoderDirection = (measuredElecRevCounts < 0) ? -1 : 1;
-				focCountsPerElecRev = measuredMagnitude;
+				focMeasuredElecRevCounts = measuredMagnitude;			// kept for reporting either way
+
+				const uint32_t disagreement = (measuredMagnitude > derivedCountsPerElecRev)
+												? measuredMagnitude - derivedCountsPerElecRev
+												: derivedCountsPerElecRev - measuredMagnitude;
+				// 0 here means "use the exact derived period" - see GetFocElecPeriod().
+				focCountsPerElecRev = (disagreement * 100 <= derivedCountsPerElecRev * ElecPeriodAgreementPercent)
+										? 0
+										: measuredMagnitude;
 				tuningError &= ~(TuningError::TooLittleMotion | TuningError::TooMuchMotion);
 			}
 			else
 			{
 				focEncoderDirection = 1;
 				focCountsPerElecRev = 0;						// fall back to the derived value
+				focMeasuredElecRevCounts = 0;					// nothing usable was measured
 				tuningError = (tuningError & ~(TuningError::TooLittleMotion | TuningError::TooMuchMotion))
 							| ((measuredMagnitude < derivedCountsPerElecRev) ? TuningError::TooLittleMotion : TuningError::TooMuchMotion);
 			}
@@ -2317,23 +2468,34 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 				focAlignmentDone = true;
 			}
 
-			// Report the measured calibration against the configured one. A large disagreement here does
-			// NOT stop the drive (we run on the measured value, which is what the motor actually does),
-			// but it means C and/or L do not describe this motor/encoder combination, and every OTHER
-			// consumer of that configuration - assistedOpen commutation, steps/mm, the plausibility band
-			// above - is still working from the wrong number, so it is worth surfacing loudly.
+			// Report the measurement against the configuration, and say which one commutation will use.
+			// The three outcomes are genuinely different and used to be reported as two.
 			{
 				const int32_t derivedForReport = (int32_t)derivedCountsPerElecRev;
 				reply.lcatf("Alignment: 1 electrical rev = %" PRIi32 " counts measured (direction %s), %" PRIi32 " counts from C/L",
 					(int32_t)measuredElecRevCounts, (focEncoderDirection < 0) ? "reversed" : "forward", derivedForReport);
-				if (focCountsPerElecRev == 0)
+				if (focMeasuredElecRevCounts == 0)
 				{
-					reply.cat(" - measurement rejected, using C/L value; check the motor is powered and the shaft is free");
+					reply.cat(" - REJECTED, using C/L value. The drive will not run until this passes.");
+#if SUPPORT_DRV8316_SPI
+					// Too little alignment torque is a live cause of this, so name the number to change.
+					reply.lcatf("Check the shaft is free; if it is, alignment torque %.3f of bus was too weak to turn it.",
+									(double)focAlignTorqueUsed);
+#else
+					reply.lcat("Check the motor is powered and the shaft is free.");
+#endif
 				}
-				else if (derivedForReport != 0
-						&& (int32_t)labs((int32_t)focCountsPerElecRev - derivedForReport) * 10 > derivedForReport)
+				else if (focCountsPerElecRev == 0)
 				{
-					reply.cat(" - WARNING: >10% disagreement, check M569.1 C (encoder CPR) and L (pole pairs)");
+					// The normal, healthy outcome. Say plainly that the exact value won, because "measured
+					// 1320, using 1333" otherwise looks like the drive ignoring its own measurement.
+					reply.cat(" - agree, commutating on the exact C/L value");
+				}
+				else
+				{
+					// Only reachable outside the agreement band, which is also where the old warning fired.
+					reply.cat(" - WARNING: C/L disagrees with the motor, commutating on the MEASURED value."
+								" Check M569.1 C (encoder CPR) and L (pole pairs)");
 				}
 			}
 
@@ -2343,7 +2505,9 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 			// d/q quantity derived from it, so it must be resolved before any current loop is closed.
 			if (focAlignTorqueUsed > 0.0f)
 			{
-				reply.lcatf("Alignment torque: %.3f of bus (limited by current ramp)", (double)focAlignTorqueUsed);
+				reply.lcatf("Alignment torque: %.3f of bus (target %.2fA, %u settle correction%s)",
+								(double)focAlignTorqueUsed, (double)alignTargetCurrent,
+								(unsigned)focAlignCorrections, (focAlignCorrections == 1) ? "" : "s");
 			}
 			if (focSenseFrameDirection != 0)
 			{
@@ -2597,6 +2761,15 @@ bool ClosedLoop::FocMeasurementUsable() const noexcept
 #endif
 }
 
+bool ClosedLoop::FocMeasurementSaturated() const noexcept
+{
+#if SUPPORT_DRV8316_SPI
+	return FocCurrentSense::IsSaturated();
+#else
+	return false;
+#endif
+}
+
 void ClosedLoop::ApplyFocDqVoltage(float vd, float vq, uint16_t electricalAngle) noexcept
 {
 	if (focController != nullptr)
@@ -2610,14 +2783,39 @@ float ClosedLoop::GetFocVoltageScale() const noexcept
 	return (focSupplyVoltage > 0.0f && focVoltageLimit > 0.0f) ? constrain<float>(focVoltageLimit / focSupplyVoltage, 0.0f, 1.0f) : 1.0f;
 }
 
-// One electrical revolution in encoder counts. Prefer the value measured by the alignment sweep; fall
-// back to the value derived from the configured CPR and pole pair count when we have not measured one
-// (not yet aligned, or the measurement was rejected as implausible).
+// The electrical period as an exact rational, in encoder counts: numerator / denominator.
+//
+// It is kept as a ratio rather than a single count because the honest value usually is not an integer.
+// C1000 L3 is 4000 counts per mechanical revolution over 3 pole pairs = 1333.33 counts, and rounding
+// that to 1333 leaves a 0.025% scale error that ComputeFocElectricalAngle() integrates for as long as
+// the axis keeps moving in one direction. Background: docs/foc-commutation.md#counts-per-elec-rev
+void ClosedLoop::GetFocElecPeriod(uint32_t& numerator, uint32_t& denominator) const noexcept
+{
+	if (focCountsPerElecRev != 0)
+	{
+		// A measurement that disagreed with C/L won, so it is all we have: whole counts, divisor 1.
+		numerator = focCountsPerElecRev;
+		denominator = 1;
+		return;
+	}
+	if (encoder == nullptr || polePairCount == 0)
+	{
+		numerator = 0;
+		denominator = 1;
+		return;
+	}
+	// Counts per MECHANICAL revolution over pole pairs. Both are exact integers from the configuration.
+	numerator = (uint32_t)lrintf(encoder->GetCountsPerStep() * (float)encoder->GetStepsPerRev());
+	denominator = polePairCount;
+}
+
+// One electrical revolution in encoder counts, rounded. For reporting only - the control path uses
+// GetFocElecPeriod() so that it never rounds.
 uint32_t ClosedLoop::GetFocCountsPerElecRev() const noexcept
 {
-	if (focCountsPerElecRev != 0) { return focCountsPerElecRev; }
-	if (encoder == nullptr || polePairCount == 0) { return 0; }
-	return (uint32_t)((encoder->GetCountsPerStep() * (float)encoder->GetStepsPerRev()) / (float)polePairCount);
+	uint32_t numerator, denominator;
+	GetFocElecPeriod(numerator, denominator);
+	return (denominator != 0) ? (numerator + denominator / 2) / denominator : 0;
 }
 
 // Commutation angle for a raw encoder count. Because the alignment sweep settles the rotor's d-axis on
@@ -2626,13 +2824,28 @@ uint32_t ClosedLoop::GetFocCountsPerElecRev() const noexcept
 // vector on the q-axis. focEncoderDirection makes this hold on rigs where the encoder counts the
 // opposite way to the electrical angle; it used to be assumed +1, which silently inverted the field
 // rotation and produced zero-torque traps rather than continuous torque.
+//
+// Any error in the electrical period is a SCALE error on this angle, so it accumulates with distance
+// travelled rather than averaging out. A 3% error is 11 degrees per electrical revolution, which on a
+// 12500-count move reached 81 degrees and stalled the motor at full current - torque follows cos of it.
+// Hence the exact rational arithmetic. Background: docs/foc-commutation.md#counts-per-elec-rev
 uint16_t ClosedLoop::ComputeFocElectricalAngle(int32_t encoderCount) const noexcept
 {
-	const uint32_t countsPerElecRev = GetFocCountsPerElecRev();
-	if (countsPerElecRev == 0) { return 0; }
-	int32_t remainder = ((int32_t)focEncoderDirection * encoderCount) % (int32_t)countsPerElecRev;
-	if (remainder < 0) { remainder += (int32_t)countsPerElecRev; }
-	return (uint16_t)((((uint32_t)remainder * 4096u) / countsPerElecRev) & 4095u);
+	uint32_t numerator, denominator;
+	GetFocElecPeriod(numerator, denominator);
+	if (numerator == 0) { return 0; }
+
+	// Reduce modulo the NUMERATOR first. That is a whole number of electrical revolutions (one
+	// mechanical revolution when the period came from C/L), so the electrical angle repeats across it
+	// exactly and the reduction costs no accuracy - unlike reducing modulo a rounded period.
+	int32_t remainder = ((int32_t)focEncoderDirection * encoderCount) % (int32_t)numerator;
+	if (remainder < 0) { remainder += (int32_t)numerator; }
+
+	// angle = remainder * denominator * 4096 / numerator. 64-bit because a high-resolution encoder can
+	// carry the 32-bit product past its limit: a 20-bit absolute encoder with 8 pole pairs would need
+	// 2^20 * 8 * 4096, well over 2^32. The divide is a few tens of cycles against an 80us tick.
+	const uint64_t scaled = (uint64_t)(uint32_t)remainder * denominator * 4096u;
+	return (uint16_t)((uint32_t)(scaled / numerator) & 4095u);
 }
 
 // External gate-driver nFAULT diagnostic input 

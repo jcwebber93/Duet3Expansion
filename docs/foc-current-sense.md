@@ -190,21 +190,133 @@ At low speed: `|Id|/|Iq|` = 0.12, current 2.6° off the q-axis, and `Iq` agreein
 
 ## <a name="alignment-overcurrent"></a>The alignment sweep was driving 6 A
 
-`alignTorque` was `min(0.5, W) × voltageScale` — half the bus, 12 V into a sub-ohm winding. Both
-current-sense amplifiers sat on their rails (+7.22 A at ADC full scale, −5.97 A at zero, exactly as the
-zero offset predicts) for **99% of the sweep**, with 177 of 205 samples reporting Kirchhoff sums of
+Originally `alignTorque` was `min(0.5, W) × voltageScale` — half the bus, 12 V into a sub-ohm winding.
+Both current-sense amplifiers sat on their rails (+7.22 A at ADC full scale, −5.97 A at zero, exactly as
+the zero offset predicts) for **99% of the sweep**, with 177 of 205 samples reporting Kirchhoff sums of
 several amps — arithmetically impossible for three real phase currents.
 
 Under the driver's 16 A trip, so nothing ever faulted, and invisible until the sweep started sampling
 current. It had been doing this on every `M569 D4` for as long as the FOC path had existed.
 
-It now ramps up under current feedback and stops at 2.5 A, typically settling around **0.07 of bus** — a
-factor of seven lower. The ramp holds the alignment angle throughout, so it doubles as a pre-settle, and
-it exits early, costing a few milliseconds against the ~900 ms CAN reply budget.
+### The first fix did not work, and the log said so
 
-A saturated sweep now **refuses to report a frame** rather than reporting a confident wrong one. The
+A coarse ramp was added: step the torque up 4% at a time, measure the peak phase current after each step,
+stop at 2.5 A. `M569 D4` reported `Alignment torque: 0.083 of bus (limited by current ramp)`, which looks
+like it worked — 0.083 of a 24 V bus is 2 V, and 2 V into a 1.34 Ω terminal resistance is 1.5 A.
+
+The measured phase current during the sweep that followed was **5.5–6.1 A**, still at the sense rail.
+
+The ramp was not lying about the torque it settled on. It was measuring the wrong thing:
+
+> **The rotor is still swinging into alignment while the ramp runs.** Applying a fixed field angle to a
+> rotor that is somewhere else pulls it round, and a moving rotor generates back EMF that opposes the
+> applied voltage. Every reading the ramp takes is suppressed by that motion. The current only reaches
+> its steady `V/R` value once the rotor has stopped — which is *after* the ramp has already chosen a
+> level and moved on.
+
+This also explains an earlier observation that had no explanation at the time: the 120 ms pre-settle drew
+4.2 A while the 400 ms sweep, at the *same commanded torque*, drew 6.4 A. Both are the same effect at
+different rotor speeds.
+
+### Alignment has a current floor as well as a ceiling
+
+The first attempt at settle-and-correct **broke alignment entirely**, and the way it broke is the reason
+every guard below exists.
+
+It checked the settled current 40 ms into the pre-settle and again 20 ms later. The second check acted on
+a reading that had not caught up with the first correction, so the two reductions compounded:
+
+| t | peak phase current | what happened |
+|---|---|---|
+| 56–124 ms | 2.4 → 3.1 A | coarse ramp, settling |
+| 128 ms | **1.82 A** | correction 1 |
+| 148 ms | **0.84 A** | correction 2 — acting on a stale reading |
+
+0.84 A against a 2.0 A target. The sweep that followed could not drag the rotor through a full electrical
+revolution: it managed about half, then slid back, and the endpoints differed by **80 counts against an
+expected 1333**.
+
+That is not a cosmetic failure. A rejected sweep sets `TuningError::TooLittleMotion` (0x4), and only
+`NeedsBasicTuning` is masked for FOC drives, so `effectiveTuningError != 0` and
+`ControlMotorCurrents()` is **never called**. The drive goes completely inert with no other symptom.
+
+So the correction is a two-sided problem. Too much current rails the sense amplifier; too little and the
+alignment silently disables the drive.
+
+### Settle, then correct — carefully
+
+1. Coarse ramp as before — gets into the right region in ~50 ms.
+2. **Pre-settle, with correction.** Hold the alignment angle. Check at 60 ms and again at 100 ms, at most
+   two passes, each guarded:
+   - **Deadband.** Only correct when `peak > 1.25 × target`. Aiming exactly at the target invites an
+     overshoot on the low side, and low is the failure that matters.
+   - **Bounded step.** One pass never reduces by more than 0.6×, so a reading taken before the rotor
+     settled cannot collapse the torque.
+   - **Absolute floor.** Never below 0.4 × whatever the ramp settled on, whatever the readings say.
+3. Sweep at the corrected level.
+
+Worst case across both passes is 0.36×, clamped by the floor to 0.4× — from a 3 A ramp result that is
+still 1.2 A, comfortably enough to turn an unloaded rotor.
+
+At standstill the winding is resistive, so current is nearly linear in applied voltage and one factor
+lands close. Crucially the correction is *measured*, so it does not depend on knowing the relationship
+between the `ApplyTorque()` argument and the resulting current — which the numbers above show is not the
+naive `fraction × Vbus / R`.
+
+This runs **inside the existing 120 ms pre-settle window**, so it costs nothing against the ~900 ms CAN
+reply budget.
+
+### The target
+
+`min(3.0 A, focMaxCurrent × 1.5)`. Alignment is a brief static hold that has to overcome cogging from a
+standstill, so it gets headroom over the running limit rather than being capped by it — a rig configured
+`F...:2.0` aligns at 3 A, not 2 A.
+
+The bracketing evidence: **5.5–6.1 A worked** (but railed the sense), **0.85 A failed**. 3 A sits between
+them with margin on both sides.
+
+Two other guards in the same area:
+
+- **A blind ramp no longer means full torque.** If the ramp completes without ever reading over target —
+  exactly the case where the measurement is broken and nothing is limiting the current — it used to leave
+  `alignTorque` at the full `W` ceiling. It now falls back to a quarter of it.
+- **Saturation during a correction backs off by one bounded step.** If the amplifiers are clipping there
+  is no reading to scale from, only the knowledge that we are past the sense range.
+
+`M569 D4` reports the outcome, and says what to change if the sweep is rejected:
+
+```
+Alignment torque: 0.055 of bus (target 3.00A, 1 settle correction)
+Alignment: 1 electrical rev = 1294 counts measured (direction forward), 1333 counts from C/L
+```
+
+A saturated sweep still **refuses to report a frame** rather than reporting a confident wrong one. The
 first version of this measurement returned "confidence 1.00" from almost entirely clipped data, which is
 the worst possible failure mode — a precise, plausible, wrong answer.
+
+---
+
+## <a name="saturation"></a>Saturation is a measurement, not a gap
+
+`FocCurrentSense` tracks two independent reasons a scan cannot be used, and the distinction matters more
+than it first appears:
+
+| counter | what it means | what the drive should do |
+|---|---|---|
+| `staleScans` | no coherent scan has arrived recently | nothing is known; hold or back off |
+| `saturatedScans` | the amplifiers are clipping | the current is **past the sense range** |
+
+The second is not an absence of information. It is the drive reporting an overcurrent in the only way it
+can. Treating it as "no data" is what produced the worst failure this project has had.
+
+Both are counted, and both count against `IsMeasurementFresh()`, but on **different thresholds**:
+saturation trips at 3 scans, staleness at 9. That ordering is deliberate. Saturated scans also increment
+`staleScans`, so if freshness depended on staleness alone, the loop would spend another ~480 µs feeding
+on the last pre-saturation reading — a reading that is *too low*, which makes the loop command **more**
+voltage into an overcurrent. The separate, shorter saturation threshold closes that window.
+
+`IsSaturated()` exposes the state to the control loop, which uses it to decide how fast to collapse its
+output — see [foc-current-control.md](foc-current-control.md#fallback).
 
 ---
 
@@ -224,19 +336,15 @@ rej=1670`.
 The fixes:
 
 - `staleScans` counts polls since the last accepted scan; `IsMeasurementFresh()` goes false after 8.
-- Saturation is detected **separately** from Kirchhoff failure and counted as `sat=`. The two mean
-  different things: a clipped reading says the current is beyond the sense range, a failed sum says the
-  three readings are not one coherent scan. Only the first is an overcurrent.
-- The current loops fall back to voltage mode on a stale measurement **and clear their integrators**.
-  Holding them would re-enter the fault the instant measurement recovered, since the held value is
-  exactly what caused it.
-
-**Known gap:** the fallback breaks a current-loop latch but cannot help a genuine stall. A stalled motor
-produces a saturated position error, so voltage mode commands `maxOutput` too — the same voltage, the
-same current, and the measurement stays saturated. This is pre-existing voltage-mode behaviour rather
-than anything current mode introduced, but current mode makes it easier to reach. Closing it needs a
-sustained-overcurrent fault that drops the drive, at the cost of aborting a move on a real machine.
-
+- Saturation is detected **separately** and on a shorter threshold — see
+  [Saturation is a measurement](#saturation) above.
+- The current loops stop regulating on an unusable measurement **and clear their integrators**. Holding
+  them would re-enter the fault the instant measurement recovered, since the held value is exactly what
+  caused it.
+- What they fall back to is bounded and decaying rather than full voltage authority — see
+  [foc-current-control.md](foc-current-control.md#fallback). Without that last piece the other three do
+  not help: the drive leaves the loops, applies full voltage, stays over the sense range, and never gets
+  a usable measurement again.
 ---
 
 ## <a name="appendix-simplefoc"></a>Appendix: how SimpleFOC does it
