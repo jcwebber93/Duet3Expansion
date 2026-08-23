@@ -446,14 +446,14 @@ static GCodeResult GetInfo(const CanMessageReturnInfo& msg, const StringRef& rep
 {
 	// Each part gets its own String<StringLength500>, and a part that overflows it is silently truncated
 	// with no indication in the output. Part 7 (closed loop) was already close to full, so gate-driver
-	// and current-sense state goes in part 8 rather than being appended to it.
-	static constexpr uint8_t LastDiagnosticsPart = 8;				// the last diagnostics part is typeDiagnosticsPart0 + 8
+	// and current-sense state goes in part 8 rather than being appended to it. The load-cell parts from
+	// upstream follow it, so this fork's numbering is upstream's shifted up by one.
 #if SUPPORT_LOADCELL_DIAGNOSTICS && SUPPORT_LOADCELL_FFT
-	static constexpr uint8_t LastDiagnosticsPart = 9;				// the last diagnostics part is typeDiagnosticsPart0 + 9
+	static constexpr uint8_t LastDiagnosticsPart = 10;				// the last diagnostics part is typeDiagnosticsPart0 + 10
 #elif SUPPORT_LOADCELL_DIAGNOSTICS
-	static constexpr uint8_t LastDiagnosticsPart = 8;				// the last diagnostics part is typeDiagnosticsPart0 + 8
+	static constexpr uint8_t LastDiagnosticsPart = 9;				// the last diagnostics part is typeDiagnosticsPart0 + 9
 #else
-	static constexpr uint8_t LastDiagnosticsPart = 7;				// the last diagnostics part is typeDiagnosticsPart0 + 7
+	static constexpr uint8_t LastDiagnosticsPart = 8;				// the last diagnostics part is typeDiagnosticsPart0 + 8
 #endif
 
 	switch (msg.type)
@@ -634,13 +634,14 @@ static GCodeResult GetInfo(const CanMessageReturnInfo& msg, const StringRef& rep
 #endif
 		break;
 #if SUPPORT_LOADCELL_DIAGNOSTICS
-	case CanMessageReturnInfo::typeDiagnosticsPart0 + 8:
+	// Upstream numbers these 8 and 9; this fork's part 8 is the gate driver, so they shift up by one.
+	case CanMessageReturnInfo::typeDiagnosticsPart0 + 9:
 		extra = LastDiagnosticsPart;
 		LoadCellDiagnostics::AppendDiagnostics(reply);
 		break;
 
 # if SUPPORT_LOADCELL_FFT
-	case CanMessageReturnInfo::typeDiagnosticsPart0 + 9:
+	case CanMessageReturnInfo::typeDiagnosticsPart0 + 10:
 		extra = LastDiagnosticsPart;
 		LoadCellDiagnostics::AppendSlowSpectrum(reply);
 		break;
