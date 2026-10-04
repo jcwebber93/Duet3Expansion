@@ -8,16 +8,16 @@ BOARD := TOOL1RR
 BINARY := Duet3Firmware_TOOL1RR
 
 # MCU configuration
-MCU := SAME51N19A
+MCU := SAME51G19A
 MCU_ARCH := cortex-m4
 FPU_FLAGS := -mfpu=fpv4-sp-d16 -mfloat-abi=hard
 
 # Compiler defines
 # C files only get noexcept define
-C_DEFINES := -D__SAME51N19A__ -D__ARM_ARCH_7EM__=1 -Dnoexcept=
+C_DEFINES := -D__SAME51G19A__ -D__ARM_ARCH_7EM__=1 -Dnoexcept=
 
 # C++ files get board-specific defines
-CXX_DEFINES := -D__SAME51N19A__ -D__ARM_ARCH_7EM__=1 -DTOOL1RR -DRTOS
+CXX_DEFINES := -D__SAME51G19A__ -D__ARM_ARCH_7EM__=1 -DTOOL1RR -DRTOS
 
 # Optimization and debug
 OPT := -O3
@@ -134,7 +134,7 @@ BIN := $(BUILD_DIR)/$(BINARY).bin
 # Pre-build step (touch Version.cpp like Eclipse does)
 .PHONY: pre-build-$(BOARD)
 pre-build-$(BOARD):
-	$(Q)touch -c $(CURDIR)/src/Version.cpp
+	$(Q)touch -c $(CURDIR)/src/Version.cpp 2>/dev/null || true
 
 # Default target
 .PHONY: $(BOARD)

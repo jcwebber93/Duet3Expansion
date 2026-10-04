@@ -19,6 +19,9 @@
 #if SUPPORT_CLOSED_LOOP
 # include <ClosedLoop/ClosedLoop.h>
 #endif
+#if SUPPORT_PHASE_STEPPING
+# include "PhaseStep.h"
+#endif
 
 class LinearDeltaKinematics;
 class PrepParams;
@@ -69,7 +72,7 @@ public:
 	uint32_t GetStepInterval(uint32_t microstepShift) const noexcept;	// Get the current full step interval for this axis or extruder
 #endif
 
-#if SUPPORT_CLOSED_LOOP
+#if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 	// Get the current position relative to the start of this move, speed and acceleration. Units are microsteps and step clocks.
 	// Return true if this drive is moving. Segments are advanced as necessary.
 	bool GetCurrentMotion(uint32_t when, MotionParameters& mParams) noexcept;
@@ -88,6 +91,7 @@ public:
 
 	// Returns the current target position in physical (internal) units, unaffected by the S0/S1 direction setting.
 	float GetTargetMotorStepsPhysical() const noexcept { return (float)currentMotorPosition + (float)distanceCarriedForwards; }
+	bool UsesPhaseStepping() const noexcept;			// return true if the phase of this drive is controlled directly, by the closed loop controller or open loop phase stepping
 #endif
 
 	static int32_t GetAndClearMaxStepsLate() noexcept;
@@ -97,10 +101,42 @@ private:
 	MoveSegment *NewSegment(uint32_t now) noexcept SPEED_CRITICAL;
 	bool ScheduleFirstSegment() noexcept;
 
+#if USE_SHADOW_SEGMENTS
+	// Movement parameters of one upcoming stepping segment, prepared in advance so that the segment-boundary invocations
+	// of the step ISR need not do the coefficient float maths. A slot spans an optional run of contiguous zero-step
+	// segments ("slivers") followed by one stepping segment, so that the ISR can release a whole sliver run without any
+	// per-segment float maths either. seg doubles as the validity flag.
+	struct ShadowSlot
+	{
+		const MoveSegment *volatile seg;				// the stepping segment this slot is for, or nullptr if the slot is free
+		const MoveSegment *chainHead;					// the first segment the slot spans: the first sliver, or seg itself if numSlivers == 0
+		uint8_t numSlivers;								// the number of contiguous zero-step segments before seg that this slot spans
+		DMState state;									// the initial DM state for seg
+		bool direction;									// the initial direction for seg
+		int32_t netSteps;								// netStepsThisSegment for seg
+		int32_t stepLimit;								// segmentStepLimit for seg
+		int32_t reverseStartStep;						// reverseStartStep for seg
+		motioncalc_t dcfAtSeg;							// distanceCarriedForwards at the start of seg, i.e. after the slivers
+		motioncalc_t t0, p, q;							// the movement parameters for seg (see the members of the same names below)
+	};
+
+	bool PrepareShadowChunk() noexcept;					// prepare the slot if it is free and there is a segment to prepare, returning true if it was filled; called from Move::Spin (MAIN task) only; deliberately in flash
+	void InvalidateShadowsFrom(uint32_t startTime) noexcept;	// invalidate the slot if segments added from startTime onwards may modify what it covers; caller must shut out the step interrupt
+	void FlushShadows() noexcept;						// drop the prepared slot; caller must be the step ISR or have it shut out
+#endif
+
 	void ReleaseSegments() noexcept;					// release the list of segments and set it to nullptr
 	bool LogStepError(uint8_t type, float info, const MoveSegment *seg) noexcept;	// report a step error
 
 	static int32_t maxStepsLate;
+
+#if SHADOW_CACHE_DIAGNOSTICS
+	// Shadow slot diagnostics, reported and reset by M122 (Move is a friend); aggregated over all drives, with the same benign race as maxStepsLate
+	static uint32_t shadowCacheHits;					// the number of segments (stepping or zero-step) consumed from a prepared slot instead of doing the float maths
+	static uint32_t shadowCacheMisses;					// the number of segments that had to do the coefficient maths in the ISR (no slot prepared, or it was invalidated)
+	static uint32_t maxCacheSkip;						// the longest run of zero-step segments released via a prepared slot in one go
+	static uint32_t maxIsrSkip;							// the longest run of zero-step segments one NewSegment call had to skip the slow way, one at a time
+#endif
 
 	// Parameters common to Cartesian, delta and extruder moves
 
@@ -126,7 +162,15 @@ private:
 	int32_t segmentStepLimit;							// the first step number of the next phase, or the reverse start step if smaller
 	int32_t reverseStartStep;							// the step number for which we need to reverse direction due to pressure advance or delta movement
 	motioncalc_t q, t0, p;								// the movement parameters of the current segment, if there is one
-#if SUPPORT_CLOSED_LOOP
+#if USE_SHADOW_SEGMENTS
+	// The prepared upcoming segment. The step ISR is the sole consumer, Move::Spin (MAIN task) the sole producer;
+	// AddLinearSegments invalidates the slot if an incoming move may modify what it covers, and anything that releases segments outside
+	// the prepared order flushes it, so the boundary falls back to the normal path and correctness never depends on the preparation.
+	// One slot is enough: serving one boundary from it leaves the whole duration of that segment for the MAIN task to prepare the next one.
+	ShadowSlot shadowSlot;
+	volatile uint32_t shadowGen;						// bumped whenever the ISR releases a segment or consumes/flushes the slot; guards the producer's snapshots
+#endif
+#if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 	motioncalc_t u;										// the initial speed of this segment
 #endif
 	MovementFlags segmentFlags;							// whether this segment checks endstops etc.
@@ -152,9 +196,26 @@ private:
 #if SUPPORT_CLOSED_LOOP
 	ClosedLoop closedLoopControl;
 #endif
+#if SUPPORT_PHASE_STEPPING
+	PhaseStep phaseStepControl;
+#endif
 };
 
+#if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 
+inline bool DriveMovement::UsesPhaseStepping() const noexcept
+{
+	return
+#if SUPPORT_CLOSED_LOOP
+		closedLoopControl.IsClosedLoopEnabled() ||
+#endif
+#if SUPPORT_PHASE_STEPPING
+		phaseStepControl.IsEnabled() ||
+#endif
+		false;
+}
+
+#endif
 
 // Calculate and store the time since the start of the move when the next step for the specified DriveMovement is due.
 // Return true if there are more steps to do. When finished, leave nextStep == totalSteps + 1 and state == DMState::idle.
@@ -190,12 +251,24 @@ inline int32_t DriveMovement::GetAndClearMaxStepsLate() noexcept
 	return ret;
 }
 
+#if USE_SHADOW_SEGMENTS
+
+// Drop the prepared slot. Called from the step ISR, or with the step interrupt shut out, when the segment list no
+// longer matches what the preparation saw or the segments are about to be released.
+inline void DriveMovement::FlushShadows() noexcept
+{
+	shadowSlot.seg = nullptr;
+	shadowGen = shadowGen + 1;
+}
+
+#endif
+
 // Return the number of net steps already taken for the current segment in the forwards direction.
 // Caller must disable interrupts before calling this
 inline int32_t DriveMovement::GetNetStepsTakenThisSegment() const noexcept
 {
-#if SUPPORT_CLOSED_LOOP
-	if (closedLoopControl.IsClosedLoopEnabled())
+#if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+	if (UsesPhaseStepping())
 	{
 		const MoveSegment *const seg = segments;
 		if (seg == nullptr) { return 0; }
@@ -227,7 +300,7 @@ inline uint32_t DriveMovement::GetStepInterval(uint32_t microstepShift) const no
 #if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 
 // Get the current position relative to the start of this segment, speed and acceleration. Units are microsteps and step clocks.
-// Return true if this drive is moving or should have moved since the last call. Segments are advanced as necessary if we are in closed loop mode.
+// Return true if this drive is moving or should have moved since the last call. Segments are advanced as necessary if we are in closed loop or phase stepping mode.
 // Inlined because it is only called from one place
 inline bool DriveMovement::GetCurrentMotion(uint32_t when, MotionParameters& mParams) noexcept
 {
@@ -245,7 +318,7 @@ inline bool DriveMovement::GetCurrentMotion(uint32_t when, MotionParameters& mPa
 
 		if ((uint32_t)timeSinceStart >= seg->GetDuration())			// if segment should have finished by now
 		{
-			if (closedLoopControl.IsClosedLoopEnabled())
+			if (UsesPhaseStepping())
 			{
 				currentMotorPosition = positionAtSegmentStart + netStepsThisSegment;
 				distanceCarriedForwards += seg->GetLength() - (motioncalc_t)netStepsThisSegment;
@@ -262,7 +335,7 @@ inline bool DriveMovement::GetCurrentMotion(uint32_t when, MotionParameters& mPa
 			}
 			timeSinceStart = seg->GetDuration();
 		}
-		else if (state == DMState::starting && closedLoopControl.IsClosedLoopEnabled())
+		else if (state == DMState::starting && UsesPhaseStepping())
 		{
 			seg = NewSegment(when);
 		}
@@ -284,7 +357,7 @@ inline bool DriveMovement::GetCurrentMotion(uint32_t when, MotionParameters& mPa
 	return hasMotion;
 }
 
-#endif	// SUPPORT_CLOSED_LOOP
+#endif	// SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 
 #endif	// SUPPORT_DRIVERS
 

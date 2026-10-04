@@ -288,8 +288,10 @@ void Move::Init() noexcept
 	SetPinMode(BrakePwmPin, OUTPUT_LOW);
 #endif
 
-# if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+# if SUPPORT_CLOSED_LOOP
 	ClosedLoop::Init();						// this must be called AFTER SmartDrivers::Init()
+# endif
+# if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 	ResetPhaseStepMonitoringVariables();
 # endif
 
@@ -313,6 +315,19 @@ void Move::Spin(bool powered) noexcept
 void Move::Spin() noexcept
 #endif
 {
+#if USE_SHADOW_SEGMENTS
+	// Prepare upcoming segment parameters for the step ISR; cheap when there is nothing to prepare.
+	// This must remain the only caller of PrepareShadowChunk (single producer).
+# if SINGLE_DRIVER
+	while (dms[0].PrepareShadowChunk()) { }
+# else
+	for (size_t drive = 0; drive < NumDrivers; ++drive)
+	{
+		while (dms[drive].PrepareShadowChunk()) { }
+	}
+# endif
+#endif
+
 # if SUPPORT_BRAKE_PWM
 	const float currentVinVoltage = Platform::GetCurrentVinVoltage();
 # endif
@@ -358,6 +373,39 @@ void Move::Spin() noexcept
 # else
 	SmartDrivers::Spin(true);
 # endif
+
+#if HAS_BOARD_THERMISTOR && SUPPORT_TMC51xx
+	// If we have a board temperature sensor and drivers that use external mosfets, then the TMC driver over temperature warning is of limited value because the mosfets will get hotter than the TMC driver.
+	// So we use the board temperature to detect that the board and hence the mosfets are getting too hot.
+	// Currently this applies only to the M23CL.
+	// At startup the parallel capacitor may still be charging, so ignore the result for a few seconds
+	if (millis64() > 3000)
+	{
+		const auto boardTemp = Platform::GetBoardTemperatureAndResult();
+		if (boardTemp.second != TemperatureError::ok || boardTemp.first >= BoardErrorTemperature)
+		{
+			if (boardTempState != BoardTemperatureState::error)
+			{
+				SmartDrivers::OverTemperatureDisable(true);
+				CanInterface::RaiseEvent(EventType::board_over_temperature, (uint16_t)(boardTemp.first * 10.0), 0, "", va_list());
+				boardTempState = BoardTemperatureState::error;
+			}
+		}
+		else if (boardTemp.first >= BoardWarningTemperature && boardTempState == BoardTemperatureState::ok)
+		{
+			CanInterface::RaiseEvent(EventType::board_temperature_warning, (uint16_t)(boardTemp.first * 10.0), 0, "", va_list());
+			boardTempState = BoardTemperatureState::warning;
+		}
+		else if (boardTemp.first <= BoardWarningTemperature - 1.0)
+		{
+			if (boardTempState == BoardTemperatureState::error)
+			{
+				SmartDrivers::OverTemperatureDisable(false);				// re-enable the drivers
+			}
+			boardTempState = BoardTemperatureState::ok;
+		}
+	}
+#endif
 
 	// Check one TMC driver for warnings and errors
 	if (enableValues[nextDriveToPoll] >= 0)				// don't poll driver if it is flagged "no poll"
@@ -545,6 +593,16 @@ void Move::AppendDiagnostics(const StringRef& reply) noexcept
 	reply.lcatf("Moves scheduled %" PRIu32 ", hiccups %u (%.2f/%.2fms), segs %u, step errors %u (types 0x%x), maxLate %" PRIi32 " maxPrep %" PRIu32,
 					scheduledMoves, numHiccups, (double)ownDelayToReport, (double)totalDelayToReport, MoveSegment::NumCreated(),
 					numStepErrors, stepErrorTypesLogged.GetRaw(), DriveMovement::GetAndClearMaxStepsLate(), maxPrepareTime);
+#if SHADOW_CACHE_DIAGNOSTICS
+	{
+		const uint32_t hits = DriveMovement::shadowCacheHits;
+		const uint32_t total = hits + DriveMovement::shadowCacheMisses;
+		reply.catf(", cacheHit %.1f%% (%" PRIu32 "/%" PRIu32 "), maxSkip %" PRIu32 ", maxCacheSkip %" PRIu32,
+						(double)((total == 0) ? 0.0f : (float)hits * 100.0f/(float)total), hits, total,
+						DriveMovement::maxIsrSkip, DriveMovement::maxCacheSkip);
+		DriveMovement::shadowCacheHits = DriveMovement::shadowCacheMisses = DriveMovement::maxIsrSkip = DriveMovement::maxCacheSkip = 0;
+	}
+#endif
 	numHiccups = 0;
 	maxPrepareTime = 0;
 	numStepErrors = 0;
@@ -655,8 +713,8 @@ __attribute__((section(".time_critical")))
 #endif
 void Move::StepDrivers(uint32_t now) noexcept
 {
-# if SUPPORT_CLOSED_LOOP
-	if (dms[0].closedLoopControl.IsClosedLoopEnabled())
+# if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+	if (dms[0].UsesPhaseStepping())
 	{
 		return;
 	}
@@ -1107,6 +1165,10 @@ void Move::AddLinearSegments(size_t drive, uint32_t startTime, const PrepParams&
 		const uint32_t oldFlags = IrqSave();
 #else
 		const uint32_t oldPrio = ChangeBasePriority(NvicPriorityStep);					// shut out the step interrupt
+#endif
+#if USE_SHADOW_SEGMENTS
+		// Invalidate any prepared slots for segments that the segments we are about to add may modify; those boundaries fall back to the normal path
+		dm.InvalidateShadowsFrom(startTime);
 #endif
 
 		// Start the search at the cached insertion hint if it is still valid, i.e. it is a segment still in the list that
@@ -1619,18 +1681,25 @@ void Move::UpdateMotorCurrent(size_t driver) noexcept
 {
 	SmartDrivers::SetCurrent(driver, (driverAtIdleCurrent[driver]) ? motorCurrents[driver] * idleCurrentFactor[driver] : motorCurrents[driver]);
 }
-void Move::SetMotorCurrent(size_t driver, float current) noexcept
+
+GCodeResult Move::SetMotorCurrent(size_t driver, float current, const StringRef& reply) noexcept
 {
-	motorCurrents[driver] = current;
+	motorCurrents[driver] = min<float>(current, SmartDrivers::GetMaxMotorCurrent(driver));
 	UpdateMotorCurrent(driver);
+	if (motorCurrents[driver] < current)
+	{
+		reply.lcatf("Driver %u.%u limited to %umA", CanInterface::GetCanAddress(), driver, (unsigned int)motorCurrents[driver]);
+		return GCodeResult::error;
+	}
+	return GCodeResult::ok;
 }
 
 // TMC driver temperatures
-float Move::GetTmcDriversTemperature()
+float Move::GetTmcDriversTemperature() noexcept
 {
-#if defined(TOOL1RR) || defined(F3PTB)
+#if defined(TOOL1RR) || defined(F3PTB) || defined(TOOLINDX)
 	// TEMPORARY code until we have more general support for TMC2240 and other drivers that report temperature
-	// The TOOL1RR has a single TMC2240 driver so report the temperature of that
+	// These boards have a single TMC2240 driver so report the temperature of that
 	return SmartDrivers::GetDriverTemperature(0);
 #else
 	const LocalDriversBitmap mask = LocalDriversBitmap::MakeLowestNBits(MaxSmartDrivers);
@@ -1754,9 +1823,16 @@ GCodeResult Move::ProcessM569(const CanMessageGeneric& msg, const StringRef& rep
 #if HAS_SMART_DRIVERS
 	{
 		uint32_t val;
-		if (parser.GetUintParam('D', val))	// set driver mode
+		if (parser.GetUintParam('D', val))		// set driver mode
 		{
 			seen = true;
+# if SUPPORT_PHASE_STEPPING
+			if (dms[drive].phaseStepControl.IsEnabled())
+			{
+				reply.printf("Cannot set driver %u.%u mode while phase stepping is enabled", CanInterface::GetCanAddress(), drive);
+				return GCodeResult::error;
+			}
+# endif
 # if SUPPORT_CLOSED_LOOP
 			// Enable/disabled closed loop control
 			const ClosedLoopMode mode = (val == (uint32_t)DriverMode::direct) ? ClosedLoopMode::closed
@@ -1779,6 +1855,16 @@ GCodeResult Move::ProcessM569(const CanMessageGeneric& msg, const StringRef& rep
 				dms[drive].closedLoopControl.DriverSwitchedToClosedLoop();
 			}
 # endif
+		}
+
+		if (parser.GetUintParam('C', val))		// set chopper control register
+		{
+			seen = true;
+			if (!SmartDrivers::SetRegister(drive, SmartDriverRegister::chopperControl, val))
+			{
+				reply.printf("Bad ccr for driver %u", drive);
+				return GCodeResult::error;
+			}
 		}
 
 		if (parser.GetUintParam('F', val))		// set off time
@@ -1914,7 +2000,7 @@ GCodeResult Move::ProcessM569(const CanMessageGeneric& msg, const StringRef& rep
 			reply.catf(" (%s)", dms[drive].closedLoopControl.GetModeText());
 		}
 # endif
-		reply.catf(", ccr 0x%05" PRIx32 ", toff %" PRIu32 ", tblank %" PRIu32,
+		reply.catf(", ccr 0x%06" PRIx32 ", toff %" PRIu32 ", tblank %" PRIu32,
 					SmartDrivers::GetRegister(drive, SmartDriverRegister::chopperControl),
 					SmartDrivers::GetRegister(drive, SmartDriverRegister::toff),
 					SmartDrivers::GetRegister(drive, SmartDriverRegister::tblank)
@@ -2082,13 +2168,13 @@ GCodeResult Move::ProcessM569Point7(const CanMessageGeneric& msg, const StringRe
 GCodeResult Move::SetMotorCurrents(const CanMessageMultipleDrivesRequest<float>& msg, size_t dataLength, const StringRef& reply) noexcept
 {
 # if HAS_SMART_DRIVERS
-	const auto drivers = Bitmap<uint16_t>::MakeFromRaw(msg.driversToUpdate);
-	if (dataLength < msg.GetActualDataLength(drivers.CountSetBits()))
+	if (dataLength < msg.GetActualDataLength())
 	{
 		reply.copy("bad data length");
 		return GCodeResult::error;
 	}
 
+	const auto drivers = Bitmap<uint16_t>::MakeFromRaw(msg.driversToUpdate);
 	GCodeResult rslt = GCodeResult::ok;
 	drivers.Iterate([this, &msg, &reply, &rslt](unsigned int driver, unsigned int count) -> void
 						{
@@ -2099,7 +2185,7 @@ GCodeResult Move::SetMotorCurrents(const CanMessageMultipleDrivesRequest<float>&
 							}
 							else
 							{
-								SetMotorCurrent(driver, msg.values[count]);
+								rslt = max<GCodeResult>(rslt, SetMotorCurrent(driver, msg.values[count], reply));
 #if SUPPORT_CLOSED_LOOP
 								dms[driver].closedLoopControl.UpdateStandstillCurrent();
 #endif
@@ -2116,13 +2202,13 @@ GCodeResult Move::SetMotorCurrents(const CanMessageMultipleDrivesRequest<float>&
 GCodeResult Move::SetStandstillCurrentFactor(const CanMessageMultipleDrivesRequest<float>& msg, size_t dataLength, const StringRef& reply) noexcept
 {
 # if HAS_SMART_DRIVERS
-	const auto drivers = Bitmap<uint16_t>::MakeFromRaw(msg.driversToUpdate);
-	if (dataLength < msg.GetActualDataLength(drivers.CountSetBits()))
+	if (dataLength < msg.GetActualDataLength())
 	{
 		reply.copy("bad data length");
 		return GCodeResult::error;
 	}
 
+	const auto drivers = Bitmap<uint16_t>::MakeFromRaw(msg.driversToUpdate);
 	GCodeResult rslt = GCodeResult::ok;
 	drivers.Iterate([this, &msg, &reply, &rslt](unsigned int driver, unsigned int count) -> void
 						{
@@ -2136,6 +2222,9 @@ GCodeResult Move::SetStandstillCurrentFactor(const CanMessageMultipleDrivesReque
 								SmartDrivers::SetStandstillCurrentPercent(driver, msg.values[count]);
 #if SUPPORT_CLOSED_LOOP
 								dms[driver].closedLoopControl.UpdateStandstillCurrent();
+#endif
+#if SUPPORT_PHASE_STEPPING
+								dms[driver].phaseStepControl.SetStandstillCurrent(msg.values[count]);
 #endif
 							}
 						}
@@ -2387,7 +2476,7 @@ bool Move::SetMicrostepping(size_t driver, unsigned int microsteps, bool interpo
 
 #endif
 
-#if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+#if SUPPORT_CLOSED_LOOP
 
 GCodeResult Move::ProcessM569Point1(const CanMessageGeneric &msg, const StringRef &reply) noexcept
 {
@@ -2451,6 +2540,140 @@ GCodeResult Move::ProcessM569Point6(const CanMessageGeneric &msg, const StringRe
 	return dms[drive].closedLoopControl.ProcessM569Point6(parser, reply);
 }
 
+#endif
+
+#if SUPPORT_PHASE_STEPPING
+
+GCodeResult Move::ProcessM970(const CanMessageGeneric& msg, const StringRef& reply) noexcept
+{
+	CanMessageGenericParser parser(msg, M970Params);
+	uint8_t drive;
+	if (!parser.GetUintParam('P', drive))
+	{
+		reply.copy("Missing P parameter in CAN message");
+		return GCodeResult::error;
+	}
+	if (drive >= NumDrivers)
+	{
+		reply.printf("Driver number %u.%u out of range", CanInterface::GetCanAddress(), drive);
+		return GCodeResult::error;
+	}
+
+	DriveMovement& dm = dms[drive];
+	bool seen = false;
+	uint8_t mode;
+	if (parser.GetUintParam('S', mode))
+	{
+		seen = true;
+		if (mode > 1)
+		{
+			reply.printf("Invalid step mode %u", mode);
+			return GCodeResult::error;
+		}
+		const bool enable = mode != 0;
+		if (enable != dm.phaseStepControl.IsEnabled())
+		{
+			if (enable)
+			{
+#if SUPPORT_CLOSED_LOOP
+				if (dm.closedLoopControl.IsClosedLoopEnabled())
+				{
+					reply.printf("Driver %u.%u is in closed loop mode", CanInterface::GetCanAddress(), drive);
+					return GCodeResult::error;
+				}
+#endif
+				delay(10);																	// let the TMC task read the microstep counter after the last movement
+				const uint16_t initialPhase = SmartDrivers::GetMicrostepPosition(drive) * 4;
+				dm.phaseStepControl.SetPhaseOffset(drive, 0);
+				GetCurrentMotion(drive, StepTimer::ConvertLocalToMovementTime(StepTimer::GetTimerTicks()), dm.phaseStepControl.mParams);
+				dm.phaseStepControl.SetPhaseOffset(drive, (initialPhase - dm.phaseStepControl.CalculateStepPhase(drive)) % 4096u);
+				dm.phaseStepControl.SetStandstillCurrent(SmartDrivers::GetStandstillCurrentPercent(drive));
+				dm.phaseStepControl.modeBeforeEnabled = SmartDrivers::GetDriverMode(drive);
+				dm.phaseStepControl.SetMotorPhase(drive, initialPhase, 1.0);				// set the coil currents to match the current microstep position before direct mode takes effect
+				if (!SmartDrivers::SetDriverMode(drive, (unsigned int)DriverMode::direct))
+				{
+					reply.printf("Driver %u.%u does not support phase stepping", CanInterface::GetCanAddress(), drive);
+					return GCodeResult::error;
+				}
+				dm.phaseStepControl.SetEnabled(true);
+				ResetPhaseStepMonitoringVariables();
+				ResetPhaseStepControlLoopCallTime();
+			}
+			else
+			{
+				dm.phaseStepControl.SetEnabled(false);
+				SmartDrivers::SetDriverMode(drive, (unsigned int)dm.phaseStepControl.modeBeforeEnabled);
+			}
+		}
+	}
+	float val;
+	if (parser.GetFloatParam('V', val))
+	{
+		seen = true;
+		dm.phaseStepControl.SetKv(val);
+	}
+	if (parser.GetFloatParam('A', val))
+	{
+		seen = true;
+		dm.phaseStepControl.SetKa(val);
+	}
+	if (!seen)
+	{
+		reply.printf("Driver %u.%u uses %s, Kv=%.1f, Ka=%.1f", CanInterface::GetCanAddress(), drive,
+						dm.phaseStepControl.IsEnabled() ? "phase stepping" : "step and direction",
+						(double)dm.phaseStepControl.GetKv(), (double)dm.phaseStepControl.GetKa());
+	}
+	return GCodeResult::ok;
+}
+
+GCodeResult Move::ProcessM970Point3(const CanMessageGeneric& msg, const StringRef& reply) noexcept
+{
+	CanMessageGenericParser parser(msg, M970Point3Params);
+	uint8_t drive;
+	if (!parser.GetUintParam('P', drive))
+	{
+		reply.copy("Missing P parameter in CAN message");
+		return GCodeResult::error;
+	}
+	if (drive >= NumDrivers)
+	{
+		reply.printf("Driver number %u.%u out of range", CanInterface::GetCanAddress(), drive);
+		return GCodeResult::error;
+	}
+
+	uint8_t harmonic;
+	if (parser.GetUintParam('S', harmonic))
+	{
+		if (harmonic < 1 || harmonic > MaxPhaseCorrectionHarmonic)
+		{
+			reply.copy("Phase correction harmonic out of range");
+			return GCodeResult::error;
+		}
+		float magnitude = 0.0, phase = 0.0;
+		const bool seenMagnitude = parser.GetFloatParam('J', magnitude);
+		const bool seenPhase = parser.GetFloatParam('O', phase);
+		if (seenMagnitude && (magnitude < 0.0 || magnitude > 90.0))
+		{
+			reply.copy("Phase correction magnitude out of range");
+			return GCodeResult::error;
+		}
+		if (seenPhase && (phase < 0.0 || phase > 360.0))
+		{
+			reply.copy("Phase correction phase out of range");
+			return GCodeResult::error;
+		}
+		return PhaseStep::ConfigureCorrection(drive, harmonic, seenMagnitude, magnitude, seenPhase, phase, reply);
+	}
+
+	reply.printf("Driver %u.%u waveform correction:", CanInterface::GetCanAddress(), drive);
+	PhaseStep::AppendCorrections(drive, reply);
+	return GCodeResult::ok;
+}
+
+#endif
+
+#if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+
 void Move::PhaseStepControlLoop() noexcept
 {
 	// Record the control loop call interval
@@ -2463,7 +2686,17 @@ void Move::PhaseStepControlLoop() noexcept
 	const uint32_t now = StepTimer::ConvertLocalToMovementTime(loopCallTime);
 	for (DriveMovement& dm : dms)
 	{
+#if SUPPORT_CLOSED_LOOP
 		dm.closedLoopControl.InstanceControlLoop(now, timeElapsed);
+#endif
+#if SUPPORT_PHASE_STEPPING
+		if (dm.phaseStepControl.IsEnabled())
+		{
+			GetCurrentMotion(dm.drive, now, dm.phaseStepControl.mParams);
+			dm.phaseStepControl.CalculateCurrentFraction();
+			dm.phaseStepControl.InstanceControlLoop(dm.drive);
+		}
+#endif
 	}
 
 	// Record how long this has taken to run
@@ -2471,6 +2704,8 @@ void Move::PhaseStepControlLoop() noexcept
 	if (loopRuntime < minPSControlLoopRuntime) { minPSControlLoopRuntime = loopRuntime; }
 	if (loopRuntime > maxPSControlLoopRuntime) { maxPSControlLoopRuntime = loopRuntime; }
 }
+
+#if SUPPORT_CLOSED_LOOP
 
 void Move::ClosedLoopDiagnostics(size_t driver, const StringRef& reply) noexcept
 {
@@ -2495,6 +2730,8 @@ bool Move::EnableIfIdle(size_t driver) noexcept
 
 	return driverStates[driver] == DriverStateControl::driverActive;
 }
+
+#endif
 
 void Move::ResetPhaseStepControlLoopCallTime() noexcept
 {
@@ -2522,6 +2759,31 @@ void Move::ResetPhaseStepMonitoringVariables() noexcept
 // Stall endstops
 GCodeResult Move::SetStallEndstopReporting(const CanMessageEnableStallEndstop& msg, const StringRef& reply) noexcept
 {
+#if SUPPORT_CLOSED_LOOP
+	if (msg.driverNumber == CanMessageEnableStallEndstop::disableAll)
+	{
+		for (DriveMovement& dm : dms)
+		{
+			dm.closedLoopControl.DisableStallEndstop();
+		}
+	}
+	else if (msg.endstopType == CanMessageEnableStallEndstop::typeEncoder)
+	{
+		if (msg.driverNumber >= NumDrivers)
+		{
+			reply.printf("board %u has no driver %u", CanInterface::GetCanAddress(), msg.driverNumber);
+			return GCodeResult::error;
+		}
+		return dms[msg.driverNumber].closedLoopControl.EnableStallEndstop(reply);
+	}
+#elif SUPPORT_DRIVERS
+	if (msg.endstopType == CanMessageEnableStallEndstop::typeEncoder)
+	{
+		reply.printf("board %u does not support encoders", CanInterface::GetCanAddress());
+		return GCodeResult::error;
+	}
+#endif
+
 #if HAS_SMART_DRIVERS && HAS_STALL_DETECT
 	return SmartDrivers::SetStallEndstopReporting(msg.driverNumber, msg.speed, reply);
 #else

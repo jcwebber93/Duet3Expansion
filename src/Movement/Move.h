@@ -26,8 +26,8 @@
 # include "AxisShaper.h"
 #endif
 
-#if SUPPORT_CLOSED_LOOP && SUPPORT_TMC51xx
-# include "StepperDrivers/TMC51xx.h"				// for SmartDrivers::GetMicrostepShift
+#if (SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP) && SUPPORT_TMC51xx
+# include "StepperDrivers/TMC51xx.h"						// for SmartDrivers::GetMicrostepShift
 #endif
 
 struct CanMessageStopMovement;
@@ -66,7 +66,7 @@ public:
 
 	void SetDirectionValue(size_t driver, bool dVal);
 	bool GetDirectionValue(size_t driver) const noexcept;
-#if SUPPORT_CLOSED_LOOP
+#if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 	bool GetDirectionValueNoCheck(size_t driver) const noexcept { return directions[driver]; }
 #endif
 
@@ -83,7 +83,7 @@ public:
 	GCodeResult SetStandstillCurrentFactor(const CanMessageMultipleDrivesRequest<float>& msg, size_t dataLength, const StringRef& reply) noexcept;
 
 # if HAS_SMART_DRIVERS
-	void SetMotorCurrent(size_t driver, float current) noexcept;		//TODO avoid the int->float->int conversion
+	GCodeResult SetMotorCurrent(size_t driver, float current, const StringRef& reply) noexcept;
 	float GetTmcDriversTemperature() noexcept;
 #  if HAS_STALL_DETECT
 	void SetOrResetEventOnStall(LocalDriversBitmap drivers, bool enable) noexcept;
@@ -166,6 +166,16 @@ public:
 
 	bool IsClosedLoopEnabled(size_t driver) const noexcept { return dms[driver].closedLoopControl.IsClosedLoopEnabled(); }
 	bool EnableIfIdle(size_t driver) noexcept;										// if the driver is idle, enable it; return true if driver enabled on return
+	void ClosedLoopDiagnostics(size_t driver, const StringRef& reply) noexcept;
+	void ClosedLoopDriverDiagnostics(size_t driver, const StringRef& reply) noexcept;
+#endif
+
+#if SUPPORT_PHASE_STEPPING
+	GCodeResult ProcessM970(const CanMessageGeneric& msg, const StringRef& reply) noexcept;
+	GCodeResult ProcessM970Point3(const CanMessageGeneric& msg, const StringRef& reply) noexcept;
+#endif
+
+#if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 	bool GetCurrentMotion(size_t driver, uint32_t when, MotionParameters& mParams) noexcept;	// get the net full steps taken, including in the current move so far, also speed and acceleration; return true if moving
 	void SetCurrentMotorSteps(size_t driver, float fullSteps) noexcept;
 	void InvertCurrentMotorSteps(size_t driver) noexcept;
@@ -173,8 +183,6 @@ public:
 	float GetTargetMotorStepsPhysical(size_t driver) const noexcept;
 
 	void PhaseStepControlLoop() noexcept;
-	void ClosedLoopDiagnostics(size_t driver, const StringRef& reply) noexcept;
-	void ClosedLoopDriverDiagnostics(size_t driver, const StringRef& reply) noexcept;
 	void ResetPhaseStepMonitoringVariables() noexcept;
 	void ResetPhaseStepControlLoopCallTime() noexcept;
 
@@ -385,6 +393,11 @@ private:
 
 	unsigned int numStepErrors = 0;
 	Bitmap<uint16_t> stepErrorTypesLogged;
+
+#if HAS_BOARD_THERMISTOR && SUPPORT_TMC51xx
+	enum class BoardTemperatureState : uint8_t { ok, warning, error };
+	BoardTemperatureState boardTempState = BoardTemperatureState::ok;
+#endif
 };
 
 //******************************************************************************************************
@@ -423,8 +436,8 @@ inline __attribute__((always_inline)) bool Move::ScheduleNextStepInterrupt() noe
 {
 #if SINGLE_DRIVER
 	if (
-# if SUPPORT_CLOSED_LOOP
-		!dms[0].closedLoopControl.IsClosedLoopEnabled() &&
+# if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+		!dms[0].UsesPhaseStepping() &&
 # endif
 		dms[0].state >= DMState::firstMotionState
 	   )
@@ -486,8 +499,8 @@ inline void Move::StepDriversHigh(uint32_t driverMap) noexcept
 
 inline void Move::SetDirection(bool direction) noexcept
 {
-# if SUPPORT_CLOSED_LOOP
-	if (dms[0].closedLoopControl.IsClosedLoopEnabled())
+# if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+	if (dms[0].UsesPhaseStepping())
 	{
 		return;
 	}
@@ -590,7 +603,7 @@ inline __attribute__((always_inline)) uint32_t Move::GetStepInterval(size_t driv
 
 #endif
 
-#if SUPPORT_CLOSED_LOOP
+#if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 
 // Get the motor position in the current move so far, also speed and acceleration. Units are full steps and step clocks.
 // Inlined because it is only called from one place
@@ -685,7 +698,7 @@ inline float Move::GetTargetMotorStepsPhysical(size_t driver) const noexcept
 	return dms[driver].GetTargetMotorStepsPhysical();
 }
 
-#endif	// SUPPORT_CLOSED_LOOP
+#endif	// SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 
 #endif	// SUPPORT_DRIVERS
 

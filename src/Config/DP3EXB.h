@@ -86,8 +86,13 @@ constexpr float MaxMotorCurrent = 1000.0;
 #define USE_MPU					0
 #define USE_CACHE				1
 
-constexpr unsigned int CANInstanceNumber = 0;
-constexpr bool UseLaterCanPins = false;
+constexpr CanParameters CanParams =
+{
+	.instanceNumber = 0,
+	.txPin = PortAPin(22),
+	.rxPin = PortAPin(23),
+	.pinsFunction = GpioPinFunction::I
+};
 
 constexpr size_t MaxPortsPerHeater = 1;
 

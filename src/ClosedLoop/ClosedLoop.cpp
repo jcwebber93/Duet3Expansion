@@ -31,6 +31,10 @@
 
 #include "ClosedLoop.h"
 
+#if SUPPORT_PHASE_STEPPING
+# include <Movement/PhaseStep.h>
+#endif
+
 #if SUPPORT_CLOSED_LOOP
 
 using std::atomic;
@@ -124,7 +128,13 @@ void ClosedLoop::SetMotorPhase(uint16_t phase, float magnitude) noexcept
 {
 	desiredStepPhase = phase;
 	float sine, cosine;
+#if SUPPORT_PHASE_STEPPING
+	// Apply the M970.3 waveform correction, but not while tuning or calibrating because those assume uniform microstepping
+	const int32_t correction = (tuning == 0) ? PhaseStep::GetCorrection(driverNumber, phase) : 0;
+	Trigonometry::FastSinCos((uint16_t)((int32_t)phase + correction), sine, cosine);
+#else
 	Trigonometry::FastSinCos(phase, sine, cosine);
+#endif
 	coilA = (int16_t)lrintf(cosine * magnitude);
 	coilB = (int16_t)lrintf(sine * magnitude);
 
@@ -257,6 +267,7 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 	float tempFocSupplyVoltage = focSupplyVoltage;
 	float tempFocVoltageLimit = focVoltageLimit;
 #endif
+	float tempDeadband;
 
 	// Pull changed parameters
 	const bool seenT = parser.GetUintParam('T', tempEncoderType);
@@ -309,8 +320,10 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 	const bool seenFocW = parser.GetFloatParam('W', tempFocMaxTorque);
 #endif
 
+	const bool seenB = parser.GetFloatParam('B', tempDeadband);		// never seen at present: B is not in our M569.1 table
+
 	// Report back if no parameters to change
-	if (!(seenT || seenC || seenPid || seenE || seenQ || seenS
+	if (!(seenT || seenC || seenPid || seenE || seenQ || seenS || seenB
 #if SUPPORT_DCSERVO
 		|| seenU || seenW || seenZ
 #endif
@@ -329,6 +342,15 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 			reply.lcatf("PID parameters P=%.1f I=%.3f D=%.3f V=%.1f A=%.1f, torque constant %.2fNm/A, J=%.1f",
 						(double)Kp, (double)Ki, (double)Kd, (double)Kv, (double)Ka, (double)torquePerAmp, (double)Kpp);
 			reply.lcatf("Warning/error threshold %.2f/%.2f", (double)errorThresholds[0], (double)errorThresholds[1]);
+#if SUPPORT_FOC
+			if (!isDcServoMode && !IsFocMode())
+#else
+			if (!isDcServoMode)
+#endif
+			{
+				// Only the stepper control path applies the deadband
+				reply.catf(", standstill deadband %.3f%s", (double)GetEffectiveDeadband(), (deadband < 0.0) ? " (auto)" : "");
+			}
 #if SUPPORT_DCSERVO
 			if (isDcServoMode)
 			{
@@ -555,6 +577,10 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 		if (seenT)
 		{
 			isDcServoMode = (tempEncoderType == EncoderType::dcServo);
+		}
+		if (seenB)
+		{
+			deadband = (tempDeadband < 0.0) ? -1.0 : tempDeadband;
 		}
 	}
 
@@ -1168,8 +1194,44 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 
 			const float targetEncoderReading = rintf(mParams.position * encoder->GetCountsPerStep());
 			currentPositionError = (float)(targetEncoderReading - encoder->GetCurrentCount()) * encoder->GetStepsPerCount();
+
+			// Apply the deadband while no movement is commanded, before the derivative filter so that the D term ignores encoder noise too.
+			// Shrinking the error by the deadband instead of zeroing it within the band keeps the P term continuous at the edge of the band.
+			// Tuning is excluded because the band would flatten the recorded tuning data and the error statistics
+			const float effectiveDeadband = GetEffectiveDeadband();
+			if (effectiveDeadband > 0.0 && tuning == 0 && mParams.speed == 0.0 && mParams.acceleration == 0.0)
+			{
+				if (currentPositionError > effectiveDeadband)
+				{
+					currentPositionError -= effectiveDeadband;
+				}
+				else if (currentPositionError < -effectiveDeadband)
+				{
+					currentPositionError += effectiveDeadband;
+				}
+				else
+				{
+					currentPositionError = 0.0;
+				}
+			}
 			errorDerivativeFilter.ProcessReading(currentPositionError, now);
 			speedFilter.ProcessReading(encoder->GetCurrentCount() * encoder->GetStepsPerCount(), now);
+
+#if HAS_STALL_DETECT
+			// A homing endstop compares how far we commanded the motor to move with how far the encoder says it moved.
+			// Comparing distances instead of the signed position error makes this independent of the encoder polarity, so it works in open loop mode and needs no tuning
+			if (stallEndstopArmed)
+			{
+				const float slip = fabsf(mParams.position - commandedStepsAtArming) - fabsf((encoder->GetCurrentCount() * encoder->GetStepsPerCount()) - encoderStepsAtArming);
+				if (errorThresholds[0] > 0 && slip > errorThresholds[0])
+				{
+					stallEndstopArmed = false;
+					stallEndstopTriggered = true;
+					SmartDrivers::driverStallsToNotify |= 1u << driverNumber;
+					CanInterface::WakeAsyncSender();
+				}
+			}
+#endif
 		}
 		float currentFraction = 0.0;
 		if (currentMode != ClosedLoopMode::open)
@@ -1238,7 +1300,7 @@ void ClosedLoop::UpdateStallDetection() noexcept
 {
 	if (inTorqueMode)
 	{
-		stall = preStall = false;
+		stall = preStall = stallEndstopTriggered = false;
 		return;
 	}
 
@@ -1288,12 +1350,21 @@ void ClosedLoop::UpdateStallDetection() noexcept
 				ApplyFocTorque(0.0f, lastFocElectricalAngle);
 			}
 #endif
-			Heat::NewDriverFault();
+			if (!PositionErrorIsExpected())
+			{
+				Heat::NewDriverFault();
+			}
 		}
 		else
 		{
 			preStall = errorThresholds[0] > 0 && positionErr > errorThresholds[0];
 		}
+	}
+
+	// Resume reporting position faults once the error left over from a homing move has recovered
+	if (stallEndstopTriggered && (errorThresholds[0] <= 0 || positionErr < errorThresholds[0]/2))
+	{
+		stallEndstopTriggered = false;
 	}
 }
 
@@ -2033,8 +2104,8 @@ StandardDriverStatus ClosedLoop::ReadLiveStatus() const noexcept
 {
 	StandardDriverStatus result;
 	result.all = 0;
-	result.closedLoopPositionNotMaintained = stall;
-	result.closedLoopPositionWarning = preStall;
+	result.closedLoopPositionNotMaintained = stall && !PositionErrorIsExpected();
+	result.closedLoopPositionWarning = preStall && !PositionErrorIsExpected();
 	result.closedLoopNotTuned = ((tuningError & encoder->MinimalTuningNeeded()) != 0);
 	result.closedLoopTuningError = ((tuningError & TuningError::AnyTuningFailure) != 0);
 #if SUPPORT_DRV8316_SPI
@@ -2553,6 +2624,8 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 #endif
 	}
 
+	stallEndstopArmed = stallEndstopTriggered = false;	// the arming references and any leftover error belong to the mode we are leaving
+
 	// If we are disabling closed loop mode, we should ideally send steps to get the microstep counter to match the current phase here
 #if SUPPORT_FOC
 	// Discard the measured commutation calibration along with the alignment when dropping to open loop:
@@ -2604,12 +2677,55 @@ StandardDriverStatus ClosedLoop::ModifyDriverStatus(StandardDriverStatus origina
 
 	if (!originalStatus.closedLoopNotTuned)
 	{
-		// Report position warnings and errors even in open loop mode, if tuning has been done
-		originalStatus.closedLoopPositionWarning = preStall;
-		originalStatus.closedLoopPositionNotMaintained = stall;
+		// Report position warnings and errors even in open loop mode, if tuning has been done.
+		// A homing move drives the axis into a stop deliberately, so neither the warning nor the error is a fault while such a move is in progress
+		originalStatus.closedLoopPositionWarning = preStall && !PositionErrorIsExpected();
+		originalStatus.closedLoopPositionNotMaintained = stall && !PositionErrorIsExpected();
 	}
 
 	return originalStatus;
+}
+
+// Arm a homing endstop that triggers when the motor falls behind the commanded position by the warning threshold.
+// This works in open loop mode too, so it does not require the driver to have been tuned
+GCodeResult ClosedLoop::EnableStallEndstop(const StringRef& reply) noexcept
+{
+	if (encoder == nullptr)
+	{
+		reply.printf("driver %u.%u has no encoder configured, see M569.1", CanInterface::GetCanAddress(), (unsigned int)driverNumber);
+		return GCodeResult::error;
+	}
+
+	if (errorThresholds[0] <= 0.0)
+	{
+		reply.printf("driver %u.%u has no position warning threshold configured, see the first value of the M569.1 E parameter", CanInterface::GetCanAddress(), (unsigned int)driverNumber);
+		return GCodeResult::error;
+	}
+
+	// Refuse rather than arm an endstop that can never trigger, because the homing move would then run into the end of the axis.
+	// The slip test only runs in the stepper control path, and the trigger is reported through the stall detect notification.
+#if HAS_STALL_DETECT
+# if SUPPORT_FOC
+	if (isDcServoMode || IsFocMode())
+# else
+	if (isDcServoMode)
+# endif
+	{
+		reply.printf("driver %u.%u: encoder stall endstops are not supported for DC servo or FOC motors", CanInterface::GetCanAddress(), (unsigned int)driverNumber);
+		return GCodeResult::error;
+	}
+#else
+	reply.printf("board %u does not support encoder stall endstops", CanInterface::GetCanAddress());
+	return GCodeResult::error;
+#endif
+
+	TaskCriticalSectionLocker lock;						// the control loop must not see one reference updated without the other
+
+	commandedStepsAtArming = mParams.position;
+	encoderStepsAtArming = encoder->GetCurrentCount() * encoder->GetStepsPerCount();
+	stallEndstopTriggered = false;
+	stallEndstopArmed = true;
+	return GCodeResult::ok;
 }
 
 // Get the current fraction and position error statistics
