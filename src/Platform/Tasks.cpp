@@ -71,12 +71,14 @@ struct UF2_Block
 // Define replacement standard library functions
 
 #if SAMC21
-// Reduce the size of the system stack below the default 1024 to save memory. When we set it to 512, M122 reported just 12 words unused, so try a higher value.
-// Need more stack if we call debugPrintf from the step ISR. 700 was not enough.
-# define SystemStackSize	(800)								// system stack size in bytes
+// Reduce the system stack below the default to save memory. 512 bytes left just 12 words unused, and 700 bytes was not enough when debugPrintf is called from the step ISR
+# define SystemStackSize	(200)								// system stack size in dwords
 #endif
 
 #include <syscalls.h>
+
+// Define the system stack. The stack doesn't actually live here, instead the linker script uses this section to define the stack start and end symbols.
+uint32_t dummySystemStack[SystemStackSize] __attribute__ ((section (".stack")));
 
 constexpr uint32_t BlockReceiveTimeout = 2000;					// bootloader block receive timeout milliseconds
 
@@ -864,17 +866,16 @@ extern "C" [[noreturn]] void UpdateBootloaderTask(void *pvParameters) noexcept
 
 #endif
 
-// Return the amount of free handler stack space
+// Return the amount of free handler stack space in words
 static ptrdiff_t GetHandlerFreeStack() noexcept
 {
-	const char * const ramend = (const char*)&_estack;
-	const char * const limit = reinterpret_cast<const char*>(sysStackLimit);
-	const char * stack_lwm = limit;
+	const char * const ramend = sysStackTop;
+	const char * stack_lwm = sysStackLimit;
 	while (stack_lwm < ramend && *stack_lwm == memPattern)
 	{
 		++stack_lwm;
 	}
-	return stack_lwm - limit;
+	return (stack_lwm - sysStackLimit) >> 2;
 }
 
 ptrdiff_t Tasks::GetNeverUsedRam() noexcept
@@ -910,7 +911,7 @@ extern "C" uint64_t TaskResetRunTimeCounter() noexcept
 void Tasks::Diagnostics(const StringRef& reply) noexcept
 {
 	// Append a memory report to a string
-	reply.lcatf("Never used RAM %d, free system stack %d words\nTasks:", GetNeverUsedRam(), GetHandlerFreeStack()/4);
+	reply.lcatf("Never used RAM %d, free system stack %d words\nTasks:", GetNeverUsedRam(), GetHandlerFreeStack());
 
 	// Now the per-task memory report
 	const uint64_t timeSinceLastCall = TaskResetRunTimeCounter();

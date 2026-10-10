@@ -79,3 +79,4 @@ Duet3Expansion FeatherM4CAN.launch
 50_2026-07-11_17.09.11.csv
 foc roadmap.md
 AGENT_CONTRIBUTIONS.md
+.stm32-debug-log.txt

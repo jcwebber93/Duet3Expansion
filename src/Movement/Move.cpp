@@ -48,6 +48,7 @@
 #include <Platform/TaskPriorities.h>
 #include <AppNotifyIndices.h>
 #include "StepperDrivers/SmartDrivers.h"
+#include "StepperDrivers/DriverMode.h"					// for the M569 D values, which closed loop boards without smart drivers also use
 
 #if USE_TC_FOR_STEP
 # if SAME5x
@@ -122,6 +123,7 @@ Move::Move() noexcept
 	for (size_t i = 0; i < NumDrivers; ++i)
 	{
 		stepsPerMm[i] = DefaultStepsPerMm;
+		GetExtruderShaper(i).UpdateStepsPerMm(DefaultStepsPerMm);
 		directions[i] = true;
 	}
 }
@@ -1469,6 +1471,7 @@ void Move::SetDriveStepsPerMm(size_t drive, float val)
 	if (drive < NumDrivers)
 	{
 		stepsPerMm[drive] = val;
+		GetExtruderShaper(drive).UpdateStepsPerMm(val);
 	}
 }
 
@@ -1804,10 +1807,8 @@ GCodeResult Move::ProcessM569(const CanMessageGeneric& msg, const StringRef& rep
 		if (parser.GetUintParam('D', val))	// set driver mode (closed loop boards without smart drivers)
 		{
 			seen = true;
-			// D4 = closed loop, D5 = assisted open — values matching DriverMode::direct and direct+1
-			// DriverMode enum is only defined when SUPPORT_TMC51xx, so use numeric literals here.
-			const ClosedLoopMode mode = (val == 4u) ? ClosedLoopMode::closed
-										: (val == 5u) ? ClosedLoopMode::assistedOpen
+			const ClosedLoopMode mode = (val == (uint32_t)DriverMode::direct) ? ClosedLoopMode::closed
+										: (val == (uint32_t)DriverMode::assistedOpen) ? ClosedLoopMode::assistedOpen
 											: ClosedLoopMode::open;
 			if (!dms[drive].closedLoopControl.SetClosedLoopEnabled(mode, reply))
 			{
@@ -1836,7 +1837,7 @@ GCodeResult Move::ProcessM569(const CanMessageGeneric& msg, const StringRef& rep
 # if SUPPORT_CLOSED_LOOP
 			// Enable/disabled closed loop control
 			const ClosedLoopMode mode = (val == (uint32_t)DriverMode::direct) ? ClosedLoopMode::closed
-										: (val == (uint32_t)DriverMode::direct + 1) ? ClosedLoopMode::assistedOpen
+										: (val == (uint32_t)DriverMode::assistedOpen) ? ClosedLoopMode::assistedOpen
 											: ClosedLoopMode::open;
 			if (!dms[drive].closedLoopControl.SetClosedLoopEnabled(mode, reply))
 			{
